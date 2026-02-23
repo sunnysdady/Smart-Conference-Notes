@@ -2,208 +2,94 @@ import streamlit as st
 import requests
 import json
 import os
-import time
 import whisper
-from dotenv import load_dotenv
 
-# ===================== 1. 界面与视觉风格配置 =====================
-load_dotenv()
-st.set_page_config(
-    page_title="飞书级图文智能纪要",
-    page_icon="🎨",
-    layout="wide",
-    initial_sidebar_state="expanded"
-)
+# ===================== 1. 基础配置与视觉注入 =====================
+st.set_page_config(page_title="智能纪要看板", page_icon="📊", layout="wide")
 
-# 密钥配置（建议放在 Secrets 中）
+# 配置通义千问 API Key
 QWEN_API_KEY = "sk-ecb46034c430477e9c9a4b4fd6589742"
-FEISHU_WEBHOOK = st.secrets.get("FEISHU_WEBHOOK", "")
 
-# 注入飞书原生视觉 CSS
+# 注入 CSS：复刻 PDF 中的色块和阴影卡片
 st.markdown("""
 <style>
-    /* 模拟飞书总结看板 */
-    .feishu-summary-card {
-        background: #ffffff;
-        border: 1px solid #dee0e3;
-        border-radius: 10px;
-        padding: 24px;
-        box-shadow: 0 4px 12px rgba(31,35,41,0.08);
-        margin-bottom: 20px;
-    }
-    /* 项目小卡片布局 */
-    .project-grid {
-        display: flex;
-        gap: 15px;
-        margin-top: 15px;
-    }
-    .project-item {
-        flex: 1;
-        border: 1px solid #e5e6eb;
-        border-radius: 8px;
-        padding: 12px;
-        background: #f9fafb;
-    }
-    /* 状态标签色块 */
+    .visual-dashboard { background: #fcfcfd; border: 1px solid #e5e6eb; border-radius: 12px; padding: 25px; margin-bottom: 20px; }
+    .card-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 15px; margin-top: 15px; }
+    .project-card { background: #ffffff; border: 1px solid #dee0e3; border-top: 4px solid #3370ff; border-radius: 8px; padding: 15px; box-shadow: 0 2px 6px rgba(0,0,0,0.05); }
     .tag { padding: 2px 8px; border-radius: 4px; font-size: 12px; font-weight: bold; float: right; }
-    .tag-green { background: #e8f8f2; color: #00b67a; } /* 正常推进 / 已完成 */
-    .tag-orange { background: #fff7e8; color: #ff9d00; } /* 需要优化 */
-    .tag-red { background: #fff2f0; color: #f53f3f; } /* 存在风险 / 待处理 */
-    
-    /* 下一步计划黄色引导条 */
-    .next-step-bar {
-        background-color: #fff7e8;
-        border-radius: 4px;
-        padding: 12px;
-        border-left: 4px solid #ff9d00;
-        color: #1f2329;
-        font-weight: 500;
-        margin-top: 20px;
-    }
+    .tag-green { background: #e8f8f2; color: #00b67a; }   /* 正常推进 [cite: 10, 15] */
+    .tag-orange { background: #fff7e8; color: #ff9d00; }  /* 需要优化 [cite: 11, 16] */
+    .tag-red { background: #fff2f0; color: #f53f3f; }     /* 存在风险 [cite: 13, 17] */
+    .next-step-bar { background: #fff7e8; border-left: 5px solid #ff9d00; padding: 15px; border-radius: 4px; margin-top: 20px; font-weight: 500; }
 </style>
 """, unsafe_allow_html=True)
 
-# ===================== 2. 语音处理与术语识别 (平移自您的代码) =====================
+# ===================== 2. 核心总结与图文转换逻辑 =====================
 
-@st.cache_resource
-def load_whisper_model():
-    return whisper.load_model("base")
-
-whisper_model = load_whisper_model()
-
-def audio_to_text(audio_file):
-    """音频转写逻辑"""
-    temp_path = f"temp_{audio_file.name}"
-    with open(temp_path, "wb") as f:
-        f.write(audio_file.getbuffer())
-    
-    result = whisper_model.transcribe(temp_path, language="zh", word_timestamps=True)
-    
-    transcript = []
-    speaker_id = 1
-    last_end_time = 0
-    filler_words = ["嗯", "啊", "这个", "那个", "然后", "其实", "就是说"]
-    
-    for segment in result["segments"]:
-        # 3秒停顿判定发言人切换
-        if segment["start"] - last_end_time >= 3 and len(transcript) > 0:
-            speaker_id += 1
-        last_end_time = segment["end"]
-        
-        clean_text = segment["text"]
-        for word in filler_words: clean_text = clean_text.replace(word, "")
-        
-        if clean_text.strip():
-            transcript.append({
-                "speaker": f"发言人{speaker_id}",
-                "text": clean_text.strip(),
-                "time": f"{int(segment['start']//60):02d}:{int(segment['start']%60):02d}"
-            })
-    
-    os.remove(temp_path)
-    return transcript
-
-# ===================== 3. 图文纪要生成与飞书卡片推送 =====================
-
-def generate_pro_visual_summary(transcript_data):
+def render_feishu_dashboard(raw_ai_text):
     """
-    调用通义千问，1:1 还原 PDF 样例中的图文模块
+    后处理：将 AI 输出的标识符 [正常推进] 等转换为 HTML 图文色块 [cite: 15, 16, 17]
+    """
+    text = raw_ai_text.replace("[正常推进]", '<span class="tag tag-green">正常推进</span>')
+    text = text.replace("[需要优化]", '<span class="tag tag-orange">需要优化</span>')
+    text = text.replace("[存在风险]", '<span class="tag tag-red">存在风险</span>')
+    
+    # 模拟看板容器逻辑
+    if "### 重点项目" in text:
+        text = text.replace("### 重点项目", '<h3 style="color:#1f2329;">📊 重点项目概览</h3>')
+    
+    return f'<div class="visual-dashboard">{text}</div>'
+
+def generate_visual_summary(content):
+    """
+    核心 Prompt：强制 AI 输出用于图文转换的标识符 
     """
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
     
-    # 强制 AI 输出带状态标识的结构
     prompt = f"""
-    你现在是飞书(Lark)官方智能秘书。请按照提供的 PDF 样例风格生成“图文总结面板”。
+    请根据提供的会议转录内容，生成一份具有“图文看板感”的智能纪要。
     
-    【核心任务】:
-    1. 提炼【重点项目】：每个项目必须标注 [正常推进]、[需要优化] 或 [存在风险]。
-    2. 生成【运营工作跟进】表格：类别、内容、负责人、状态（已完成/待处理/计划中）。
-    3. 提取【关键决策】：问题 -> 方案 -> 依据。
-    4. 提取【金句时刻】：引用说话人的原话。
-    5. 提炼【智能章节】：带 XX:XX 时间戳。
+    【核心模块要求】：
+    1. **重点项目看板**：提炼3个最核心项目，每个项目必须附带 [正常推进]、[需要优化] 或 [存在风险] 状态标签。 [cite: 8, 14]
+    2. **运营工作表格**：生成 工作类别 | 具体内容 | 负责人 | 状态 的 Markdown 表格。 [cite: 31]
+    3. **下一步计划**：💡 开头，总结后续核心动作。 [cite: 32]
+    4. **关键决策**：用“问题->方案->依据”结构提炼决策点。 [cite: 128-133]
+    5. **待办清单**：数字编号，列出具体的行动指令。 [cite: 98-101]
 
-    【内容原文】:
-    {json.dumps(transcript_data, ensure_ascii=False)}
+    【原文内容】：
+    {content}
     """
-
+    
     data = {
         "model": "qwen-max",
         "input": {"messages": [{"role": "user", "content": prompt}]},
-        "parameters": {"result_format": "text", "temperature": 0.1}
+        "parameters": {"result_format": "text", "temperature": 0.2}
     }
-
+    
     try:
         response = requests.post(url, headers=headers, json=data, timeout=60)
-        return response.json()["output"]["text"]
+        raw_text = response.json()["output"]["text"]
+        return render_feishu_dashboard(raw_text)
     except Exception as e:
-        st.error(f"API 报错: {e}")
+        st.error(f"生成失败: {e}")
         return None
 
-def push_feishu_interactive_card(summary_text):
-    """
-    发送飞书互动卡片，这是实现手机端“图文感”的唯一方式
-    """
-    if not FEISHU_WEBHOOK: return
-    
-    # 将标签替换为飞书卡片表情符
-    card_md = summary_text.replace("[正常推进]", "🟢 **正常推进**")
-    card_md = card_md.replace("[存在风险]", "🔴 **存在风险**")
-    card_md = card_md.replace("[需要优化]", "🟠 **需要优化**")
+# ===================== 3. UI 布局界面 =====================
 
-    payload = {
-        "msg_type": "interactive",
-        "card": {
-            "config": {"wide_screen_mode": True},
-            "header": {
-                "title": {"tag": "plain_text", "content": "📅 智能会议图文纪要"},
-                "template": "blue"
-            },
-            "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": card_md}},
-                {"tag": "hr"},
-                {"tag": "note", "elements": [{"tag": "plain_text", "content": "100% 飞书原版风格还原"}]}
-            ]
-        }
-    }
-    requests.post(FEISHU_WEBHOOK, json=payload)
+st.title("📑 智能纪要可视化看板")
+st.caption("专注内容总结与图文视觉还原，去中心化处理办公内容。")
 
-# ===================== 4. 网页端排版逻辑 =====================
+uploaded_file = st.file_uploader("上传录音转写文本或 PDF 内容文本", type=["txt"])
 
-def render_visual_web_card(text):
-    """在网页端渲染带色块的图文面板"""
-    # 转换状态标签为 HTML 颜色块
-    text = text.replace("[正常推进]", '<span class="tag tag-green">正常推进</span>')
-    text = text.replace("[需要优化]", '<span class="tag tag-orange">需要优化</span>')
-    text = text.replace("[存在风险]", '<span class="tag tag-red">存在风险</span>')
-    text = text.replace("[已完成]", '<span class="tag tag-green">已完成</span>')
-    text = text.replace("[待处理]", '<span class="tag tag-red">待处理</span>')
-    
-    # 包装到容器中
-    st.markdown(f'<div class="feishu-summary-card">{text}</div>', unsafe_allow_html=True)
-
-# ===================== 5. 主程序 UI =====================
-
-st.title("📝 飞书级图文智能纪要助手")
-
-uploaded_file = st.file_uploader("上传录音或文本", type=["mp3", "wav", "m4a", "txt"])
-
-if uploaded_file and st.button("🚀 生成图文纪要并推送", type="primary"):
-    with st.spinner("🧠 正在构建飞书级图文面板..."):
-        # 获取源数据
-        if uploaded_file.type.startswith("audio"):
-            transcript = audio_to_text(uploaded_file)
-        else:
-            transcript = [{"speaker": "发言人", "text": uploaded_file.read().decode("utf-8"), "time": "00:00"}]
+if uploaded_file and st.button("🚀 生成图文总结看板", type="primary"):
+    with st.spinner("🧠 正在构建视觉总结..."):
+        content = uploaded_file.read().decode("utf-8")
+        final_html = generate_visual_summary(content)
         
-        # 生成纪要
-        final_summary = generate_pro_visual_summary(transcript)
-        
-        if final_summary:
-            st.subheader("📋 预览：图文纪要看板")
-            # 渲染网页版图文面板
-            render_visual_web_card(final_summary)
+        if final_html:
+            # 直接在网页端显示带色块的看板
+            st.markdown(final_html, unsafe_allow_html=True)
             
-            # 推送飞书卡片
-            push_feishu_interactive_card(final_summary)
-            st.toast("✅ 图文卡片已推送至飞书！", icon="📲")
+            # 提供 Markdown 原始文本下载
+            st.download_button("下载纪要文本", final_html, file_name="智能纪要看板.html")
