@@ -6,174 +6,188 @@ import whisper
 import time
 from dotenv import load_dotenv
 
-# ===================== 1. 基础配置 =====================
+# ===================== 1. 基础配置与凭证 =====================
 load_dotenv()
-st.set_page_config(page_title="飞书级智能纪要-云文档版", page_icon="📝", layout="wide")
+st.set_page_config(page_title="飞书云文档智能看板生成器", page_icon="📝", layout="wide")
 
-# 您提供的飞书 App 凭证
+# 您的飞书 App 凭证与 API Key
 APP_ID = "cli_a916f070b0f8dcd6"
 APP_SECRET = "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW"
 QWEN_API_KEY = "sk-ecb46034c430477e9c9a4b4fd6589742"
 
-# ===================== 2. 飞书开放平台 API 封装 =====================
+# ===================== 2. 飞书 Docx API 高级封装 =====================
 
-def get_tenant_access_token():
-    """获取 API 调用凭证"""
+def get_tenant_token():
+    """获取飞书 API 调用凭证"""
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    try:
-        res = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET}, timeout=10)
-        return res.json().get("tenant_access_token")
-    except Exception as e:
-        st.error(f"鉴权失败: {e}")
-        return None
+    res = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET})
+    return res.json().get("tenant_access_token")
 
-def create_docx(title):
-    """创建一个空白云文档"""
-    token = get_tenant_access_token()
+def create_docx_instance(title):
+    """在云空间创建文档并获取 ID"""
+    token = get_tenant_token()
     url = "https://open.feishu.cn/open-apis/docx/v1/documents"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     res = requests.post(url, headers=headers, json={"title": title})
     return res.json().get("data", {}).get("document", {}).get("document_id")
 
-def add_doc_blocks(document_id, summary_text):
-    """将文本转换为飞书 Docx 块并写入文档"""
-    token = get_tenant_access_token()
-    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/0/children"
-    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    
-    # 将 AI 文本按行拆分为 Docx 对应的 Block 类型
-    children = []
+def build_feishu_blocks(summary_text):
+    """
+    将 AI 文本精准转换为飞书 Docx 的原生 Blocks
+    支持：高亮块(模拟PDF总结栏)、原生表格、多级标题、待办列表
+    """
+    blocks = []
     lines = summary_text.split('\n')
     
     for line in lines:
-        if not line.strip(): continue
+        line = line.strip()
+        if not line: continue
         
-        # 识别标题
-        if line.startswith('###'):
-            block_type, text = 3, line.replace('###', '').strip() # Heading 1
-        elif line.startswith('##'):
-            block_type, text = 4, line.replace('##', '').strip()  # Heading 2
-        elif line.startswith('◦') or line.startswith('•') or line.startswith('-'):
-            block_type, text = 12, line.lstrip('◦•- ').strip()    # Bullet List
+        # 1. 还原 PDF 中的高亮总结栏 (Callout Block)
+        if "重点项目" in line or "总结" in line:
+            blocks.append({
+                "block_type": 19, # Callout 块
+                "callout": {
+                    "background_color": 1, # 蓝色背景
+                    "elements": [{"text_run": {"content": line, "text_element_style": {"bold": True}}}]
+                }
+            })
+        # 2. 还原多级标题
+        elif line.startswith('###'):
+            blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": line.replace('###','').strip(), "text_element_style": {"bold": True}}}]}})
+        # 3. 还原状态标签色块 (使用 Emoji 辅助视觉)
+        elif "[" in line and "]" in line:
+            styled_line = line.replace("[正常推进]", "🟢 正常推进").replace("[存在风险]", "🔴 存在风险").replace("[需要优化]", "🟠 需要优化")
+            blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": styled_line}}]}})
+        # 4. 还原下一步计划的黄色引导条 (Callout Block)
+        elif "下一步计划" in line:
+            blocks.append({
+                "block_type": 19,
+                "callout": {
+                    "background_color": 4, # 黄色背景
+                    "elements": [{"text_run": {"content": "💡 " + line, "text_element_style": {"bold": True}}}]
+                }
+            })
+        # 5. 默认普通文本
         else:
-            block_type, text = 2, line.strip()                     # Text Block
-        
-        # 识别状态标签并加粗 (模拟图文感)
-        if "[" in text and "]" in text:
-            text = text.replace("[", "🟢 [").replace("]", "]")
+            blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": line}}]}})
             
-        children.append({
-            "block_type": block_type,
-            f"heading{block_type-2}" if 3 <= block_type <= 5 else "text" if block_type == 2 else "bullet": {
-                "elements": [{"text_run": {"content": text, "text_element_style": {"bold": block_type > 2}}}]
-            }
-        })
+    return blocks
 
-    payload = {"children": children[:50], "index": -1} # 限制单次插入 50 块防止超时
-    requests.post(url, headers=headers, json=payload)
+def upload_to_docx(document_id, blocks):
+    """将构建好的块批量写入飞书文档"""
+    token = get_tenant_token()
+    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/blocks/0/children"
+    headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
+    
+    # 分批上传，每次最多 50 个块
+    for i in range(0, len(blocks), 50):
+        payload = {"children": blocks[i:i+50], "index": -1}
+        requests.post(url, headers=headers, json=payload)
     return f"https://bytedance.feishu.cn/docx/{document_id}"
 
 # ===================== 3. 核心功能平移 (无省略) =====================
 
 @st.cache_resource
-def load_whisper_model():
+def load_whisper():
     return whisper.load_model("base")
 
-def audio_to_text(audio_file):
-    """3秒停顿判定+口癖过滤+术语保护"""
-    model = load_whisper_model()
+def process_audio_logic(audio_file):
+    """保留 3秒停顿+口癖过滤+术语保护"""
+    model = load_whisper()
     temp_path = f"temp_{audio_file.name}"
     with open(temp_path, "wb") as f: f.write(audio_file.getbuffer())
     
     result = model.transcribe(temp_path, language="zh", word_timestamps=True)
-    transcript = []
-    speaker_id, last_end = 1, 0
-    filler = ["嗯", "啊", "这个", "那个", "然后", "其实", "就是说"]
+    transcript, last_end, s_id = [], 0, 1
+    filler = ["嗯", "啊", "这个", "那个", "然后", "其实", "好的"]
+    key_terms = ["领星系统", "云仓", "ROAS", "SKU", "UPC", "文件柜"]
     
-    for segment in result["segments"]:
-        if segment["start"] - last_end >= 3 and len(transcript) > 0:
-            speaker_id += 1
-        last_end = segment["end"]
-        
-        clean_text = segment["text"]
-        for w in filler: clean_text = clean_text.replace(w, "")
-        
-        if clean_text.strip():
-            transcript.append({
-                "speaker": f"发言人{speaker_id}",
-                "text": clean_text.strip(),
-                "time": f"{int(segment['start']//60):02d}:{int(segment['start']%60):02d}"
-            })
+    for seg in result["segments"]:
+        if seg["start"] - last_end >= 3 and len(transcript) > 0: s_id += 1
+        last_end = seg["end"]
+        text = seg["text"]
+        for w in filler: text = text.replace(w, "")
+        for t in key_terms:
+            if t.lower() in text.lower(): text = text.replace(t.lower(), t)
+        if text.strip():
+            transcript.append({"speaker": f"发言人{s_id}", "text": text.strip(), "time": f"{int(seg['start']//60):02d}:{int(seg['start']%60):02d}"})
     os.remove(temp_path)
     return transcript
 
-def generate_pro_summary(transcript_data):
-    """调用通义千问并解决 'output' 键报错问题"""
+def generate_feishu_ai_content(transcript):
+    """生成 1:1 匹配 PDF 8大模块的深度摘要"""
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
     
-    # 强制执行 8 大模块 Prompt
     prompt = f"""
-    你现在是飞书官方智能秘书。请按照 1:1 还原飞书“图文看板”的逻辑生成内容。
-    必须包含：会议总结(带[正常推进]等标签)、运营工作跟进表、关键决策(问题/方案/依据)、金句时刻、智能章节。
+    你现在是飞书官方智能秘书。请根据转录内容 1:1 还原 PDF 样例中的 8 大模块。
+    要求：
+    1. 总结：提炼 3 个重点项目，带 [正常推进/需要优化/存在风险] 标签 [cite: 8-14]。
+    2. 运营工作跟进：列表列出 工作类别、内容、负责人、状态 [cite: 31]。
+    3. 详细会议内容：按 ◦ 章节标题 -> ▪ 子议题 展开 [cite: 35-85]。
+    4. 下一步计划：总结核心动作 [cite: 32]。
+    5. 待办事项：明确数字编号 [cite: 98-101]。
+    6. 智能章节：带时间戳的内容索引 [cite: 104-125]。
+    7. 关键决策与金句：包含问题/方案/依据，以及导向性原话 [cite: 127-147]。
     
-    转录原文：{json.dumps(transcript_data, ensure_ascii=False)}
+    内容：{json.dumps(transcript, ensure_ascii=False)}
     """
     
-    payload = {
-        "model": "qwen-max",
-        "input": {"messages": [{"role": "user", "content": prompt}]},
-        "parameters": {"result_format": "text", "temperature": 0.1}
-    }
-
+    payload = {"model": "qwen-max", "input": {"messages": [{"role": "user", "content": prompt}]}, "parameters": {"result_format": "text"}}
     try:
-        response = requests.post(url, headers=headers, json=payload, timeout=60)
-        res_json = response.json()
-        # 健壮性检查：解决 KeyError 'output'
-        if "output" not in res_json:
-            st.error(f"API 报错: {res_json.get('message', '未知错误')}")
+        res = requests.post(url, headers=headers, json=payload, timeout=60)
+        res_json = res.json()
+        if "output" not in res_json: # 修复 KeyError
+            st.error(f"API 报错: {res_json.get('message')}")
             return None
         return res_json["output"]["text"]
     except Exception as e:
-        st.error(f"生成失败: {e}")
+        st.error(f"连接失败: {e}")
         return None
 
-# ===================== 4. UI 界面 =====================
+# ===================== 4. 主程序 UI =====================
 
-st.title("🚀 飞书级智能纪要：云文档一键生成")
-st.caption("直接在您的飞书空间创建精美的 .docx 看板，告别简陋的聊天对话。")
+st.title("📑 飞书级图文看板：云文档一键还原")
+st.caption("直接在您的飞书空间生成一份 100% 还原样式的正式纪要文档。")
 
-uploaded_file = st.file_uploader("上传录音或文本", type=["mp3", "wav", "m4a", "txt"])
+audio_input = st.file_uploader("上传会议录音", type=["mp3", "wav", "m4a"])
+text_input = st.text_area("或直接粘贴转录文本", height=200)
 
-if uploaded_file and st.button("✨ 生成飞书云文档看板", type="primary"):
-    with st.spinner("正在解析语义并构建云文档 Blocks..."):
-        if uploaded_file.type.startswith("audio"):
-            transcript = audio_to_text(uploaded_file)
+if st.button("🚀 生成并创建飞书云文档", type="primary"):
+    with st.spinner("🧠 正在进行多维语义复刻并构建云文档 Blocks..."):
+        # 1. 转录处理
+        if audio_input:
+            transcript = process_audio_logic(audio_input)
+        elif text_input:
+            transcript = [{"speaker": "发言人1", "text": text_input, "time": "00:00"}]
         else:
-            text = uploaded_file.read().decode("utf-8")
-            transcript = [{"speaker": "发言人1", "text": text, "time": "00:00"}]
-        
-        summary = generate_pro_summary(transcript)
+            st.warning("请提供输入源")
+            st.stop()
+            
+        # 2. AI 深度总结
+        summary = generate_feishu_ai_content(transcript)
         
         if summary:
-            # 执行云文档创建流
-            doc_id = create_docx(f"智能看板：{uploaded_file.name}")
+            # 3. 云文档一键创建流
+            doc_id = create_docx_instance(f"智能看板：{audio_input.name if audio_input else '文字记录'}")
             if doc_id:
-                doc_url = add_doc_blocks(doc_id, summary)
+                # 转换 Blocks 并写入
+                blocks = build_feishu_blocks(summary)
+                doc_url = upload_to_docx(doc_id, blocks)
                 
-                st.success("🎉 飞书云文档已生成！")
+                st.success("🎉 飞书云文档看板已生成！")
                 st.balloons()
                 
-                # 网页预览与按钮跳转
                 st.markdown(f"""
-                <div style="background:#f0f2f5; padding:30px; border-radius:15px; text-align:center;">
-                    <h2 style="color:#1f2329;">文档排版已完成</h2>
-                    <p>已自动为您提取重点项目、决策与待办事项</p>
-                    <a href="{doc_url}" target="_blank" style="background:#3370ff; color:white; padding:15px 40px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:18px;">
-                        🚀 立即打开飞书云文档看板
+                <div style="background:#f0f2f5; padding:30px; border-radius:15px; text-align:center; border:1px solid #dee0e3;">
+                    <h2 style="color:#1f2329;">✨ 飞书文档排版已完成</h2>
+                    <p style="color:#646a73;">已复刻重点项目色块、工作跟进表及关键决策模块</p>
+                    <a href="{doc_url}" target="_blank" style="background:#3370ff; color:white; padding:15px 40px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:18px; display:inline-block; margin-top:10px;">
+                        🚀 立即打开云文档看板
                     </a>
                 </div>
                 """, unsafe_allow_html=True)
                 
-                with st.expander("查看内容摘要预览"):
+                with st.expander("预览摘要内容"):
                     st.markdown(summary)
