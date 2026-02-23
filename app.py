@@ -4,151 +4,152 @@ import requests
 import time
 import os
 
-# --- 1. 基础配置与安全 ---
-st.set_page_config(page_title="AI 智能纪要助理 - 自动选型版", page_icon="🤖", layout="wide")
+# --- 1. 基础配置与安全检查 ---
+st.set_page_config(page_title="飞书级智能纪要助理", page_icon="📝", layout="wide")
 
+# 从 Secrets 获取 Key
 if "GEMINI_API_KEY" in st.secrets:
     genai.configure(api_key=st.secrets["GEMINI_API_KEY"])
 else:
-    st.error("❌ 请在 Streamlit Cloud 的 Secrets 中配置 GEMINI_API_KEY")
+    st.error("❌ 未在 Streamlit Secrets 中检测到 GEMINI_API_KEY")
     st.stop()
 
 FEISHU_WEBHOOK = st.secrets.get("FEISHU_WEBHOOK", "")
 
-# --- 2. 智能模型管理 ---
+# --- 2. 核心逻辑：智能模型管理 ---
 
 def get_available_models():
-    """实时获取当前 API Key 支持的所有模型列表"""
+    """实时获取当前 API Key 支持的可用模型列表"""
     try:
         # 过滤出支持生成内容的模型
         models = [m.name.replace('models/', '') for m in genai.list_models() 
                  if 'generateContent' in m.supported_generation_methods]
         return models
     except Exception as e:
-        st.error(f"模型列表获取失败: {e}")
-        return ["gemini-1.5-flash"]
+        # 若获取失败（通常是 429），提供保底选项
+        return ["gemini-2.0-flash", "gemini-1.5-flash", "gemini-1.5-pro"]
 
 def auto_select_model(uploaded_file, available_models):
-    """根据文件类型和大小自动匹配最优模型"""
+    """根据文件特征自动决策最优模型 (针对 Pro 用户优化)"""
     is_audio = uploaded_file.type.startswith("audio")
     file_size_kb = uploaded_file.size / 1024
     
-    # 优先级定义：2.0/2.5 是目前最先进的
+    # 优先级：优先使用 2.0 系列（响应最快、理解最强）
     if is_audio:
-        # 音频任务：Flash 模型速度快且对语音索引支持极佳
-        priority = ["gemini-2.0-flash", "gemini-2.5-flash", "gemini-1.5-flash"]
-    elif file_size_kb > 100:
-        # 大文本任务：优先使用 Pro 系列保证深度理解
-        priority = ["gemini-2.0-pro", "gemini-2.5-pro", "gemini-1.5-pro"]
+        # 音频任务：Flash 2.0 的音轨索引能力极强
+        priority = ["gemini-2.0-flash", "gemini-1.5-flash"]
+    elif file_size_kb > 200:
+        # 超长文本：优先使用 Pro 或最新的实验性型号
+        priority = ["gemini-2.0-pro-exp-02-05", "gemini-2.0-flash", "gemini-1.5-pro"]
     else:
-        # 普通任务：追求极致响应速度
-        priority = ["gemini-2.0-flash", "gemini-2.0-flash-lite", "gemini-1.5-flash"]
+        # 普通任务
+        priority = ["gemini-2.0-flash", "gemini-1.5-flash"]
     
-    # 在可用列表中寻找匹配项
     for p in priority:
-        if p in available_models:
-            return p
-    return available_models[0] # 保底选择
+        if p in available_models: return p
+    return available_models[0]
 
-# --- 3. 飞书卡片推送 (还原飞书感) ---
+# --- 3. 飞书卡片推送 (100% 还原飞书蓝) ---
 
 def push_to_feishu(content, file_name, model_used):
     if not FEISHU_WEBHOOK: return False
     
-    # 飞书蓝模板
     payload = {
         "msg_type": "interactive",
         "card": {
             "header": {
-                "title": {"tag": "plain_text", "content": "📅 智能会议纪要 (Feishu Style)"},
-                "template": "blue"
+                "title": {"tag": "plain_text", "content": "🤖 智能会议纪要已生成"},
+                "template": "blue" # 飞书妙记经典蓝
             },
             "elements": [
-                {"tag": "div", "text": {"tag": "lark_md", "content": f"**📁 来源文件：** {file_name}\n**🧠 执行模型：** `{model_used}`"}},
+                {"tag": "div", "text": {"tag": "lark_md", "content": f"**📁 来源文件：** {file_name}\n**🧠 处理模型：** `{model_used}`"}},
                 {"tag": "hr"},
                 {"tag": "div", "text": {"tag": "lark_md", "content": content}},
                 {"tag": "hr"},
                 {
                     "tag": "note", 
-                    "elements": [{"tag": "plain_text", "content": "✅ 已自动提取议程与待办事项 | 100% AI 驱动"}]
+                    "elements": [{"tag": "plain_text", "content": "✨ 100% 还原飞书妙记风格 | Google AI Pro 驱动"}]
                 }
             ]
         }
     }
     try:
-        r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=10)
+        r = requests.post(FEISHU_WEBHOOK, json=payload, timeout=15)
         return r.status_code == 200
     except: return False
 
-# --- 4. UI 界面 ---
+# --- 4. 主 UI 界面 ---
 
 st.title("📝 飞书级智能纪要助手")
-st.caption("基于 Gemini 多模态模型，自动选型，一键推送到飞书。")
+st.caption("上传录音或文本，自动生成结构化纪要并回传飞书机器人。")
 
-# 侧边栏：显示诊断信息
 with st.sidebar:
-    st.header("⚙️ 系统状态")
+    st.header("⚙️ 诊断与设置")
     all_models = get_available_models()
-    st.write(f"当前可用模型数: {len(all_models)}")
-    with st.expander("查看模型清单"):
-        st.write(all_models)
+    st.success(f"当前可用模型数: {len(all_models)}")
     st.divider()
-    st.warning("注：上传音频后请耐心等待，AI 需要时间扫描音轨。")
+    st.info("💡 **Pro 用户提示**：\nAPI 的免费额度限制为每分钟约 2-15 次请求。若报错 429，请稍等 1 分钟再试。")
 
-uploaded_file = st.file_uploader("拖入音频或会议文稿 (mp3, wav, m4a, txt)", type=['mp3', 'wav', 'm4a', 'txt'])
-
-# --- 5. 核心处理逻辑 ---
+uploaded_file = st.file_uploader("拖入文件 (mp3, wav, m4a, txt)", type=['mp3', 'wav', 'm4a', 'txt'])
 
 if uploaded_file:
-    # 自动执行选型逻辑
-    target_model = auto_select_model(uploaded_file, all_models)
-    st.info(f"✨ **智能选型结果**：已自动选择最优模型 `{target_model}` 来处理您的文件。")
-    
-    if st.button("🚀 开始魔法处理"):
+    # 自动执行智能选型
+    best_model = auto_select_model(uploaded_file, all_models)
+    st.info(f"🎯 **智能决策**：已为您匹配当前最佳模型 `{best_model}`")
+
+    if st.button("🚀 开始生成并回传飞书"):
         try:
-            model = genai.GenerativeModel(model_name=f"models/{target_model}")
+            model = genai.GenerativeModel(model_name=f"models/{best_model}")
             
-            # 强化 Prompt：确保 100% 还原飞书逻辑
+            # 飞书级 Prompt 灵魂（深度还原）
             prompt = """
-            你现在是飞书妙记(Feishu Magic Minutes)的数字孪生。请深度解析以下内容，并生成一份完美的结构化纪要。
-            
-            必须包含以下模块：
-            1. **【会议概览】**：两句话总结核心背景与共识。
-            2. **【关键词】**：5个带#号的标签。
-            3. **【议程回顾】**：按逻辑顺序拆解会议讨论点（带重点详情）。
-            4. **【待办事项 ✅】**：提取明确的任务、负责人和截止日期。
+            你现在是飞书妙记(Feishu Magic Minutes)的数字孪生。请为我生成一份完美的结构化纪要。
+            要求：
+            1. **【会议概览】**：精炼说明会议背景、讨论核心及最终共识。
+            2. **【关键词】**：提取5个带#号的标签。
+            3. **【议程回顾】**：按逻辑拆解议题，使用列表展示讨论详情。
+            4. **【待办事项 ✅】**：提取任务、负责人、截止日期。若无负责人请注为“待跟进”。
             5. **【精彩瞬间】**：摘录 1-2 句最具决策性的原话。
-            
-            请直接输出 Markdown 内容。
+            直接输出 Markdown 格式。
             """
 
-            with st.spinner(f"正在使用 {target_model} 深度处理中..."):
+            with st.spinner(f"AI 正在深度倾听/阅读中..."):
                 if uploaded_file.type.startswith("audio"):
-                    # 处理音频：保存临时文件并上传
-                    temp_name = f"temp_{int(time.time())}.{uploaded_file.name.split('.')[-1]}"
-                    with open(temp_name, "wb") as f:
+                    # 临时保存音频
+                    temp_path = f"temp_{int(time.time())}_{uploaded_file.name}"
+                    with open(temp_path, "wb") as f:
                         f.write(uploaded_file.getbuffer())
                     
-                    gemini_file = genai.upload_file(path=temp_name)
-                    while gemini_file.state.name == "PROCESSING":
-                        time.sleep(2)
-                        gemini_file = genai.get_file(gemini_file.name)
+                    # 上传至 Gemini File API
+                    g_file = genai.upload_file(path=temp_path)
+                    while g_file.state.name == "PROCESSING":
+                        time.sleep(3)
+                        g_file = genai.get_file(g_file.name)
                     
-                    response = model.generate_content([gemini_file, prompt])
-                    os.remove(temp_name) # 清理
+                    response = model.generate_content([g_file, prompt])
+                    os.remove(temp_path) # 清理本地空间
                 else:
-                    # 处理文本
+                    # 纯文本处理
                     text_content = uploaded_file.read().decode("utf-8")
                     response = model.generate_content([text_content, prompt])
 
-                # 预览与推送
-                st.success("🎉 生成完成！")
+                # 页面展示
+                st.success("🎉 纪要生成成功！")
                 st.markdown(response.text)
 
-                if push_to_feishu(response.text, uploaded_file.name, target_model):
-                    st.toast("已同步至飞书群！", icon='📲')
+                # 自动执行推送
+                if push_to_feishu(response.text, uploaded_file.name, best_model):
+                    st.toast("已同步至飞书机器人卡片！", icon="📲")
                 else:
-                    st.error("推送飞书失败，请检查 Webhook。")
+                    st.warning("⚠️ 推送失败。请确认飞书 Webhook 里的关键词是否包含‘会议’或‘纪要’。")
 
         except Exception as e:
-            st.error(f"发生错误: {str(e)}")
+            if "429" in str(e):
+                st.error("🚨 **触发频率限制 (Error 429)**：免费版 API 跑太快啦！请等待 60 秒后重试。")
+                st.info("💡 既然您已订阅 Google AI Pro，也可以直接将文件丢进 Gemini Advanced 网页版，那里是无限制的。")
+            else:
+                st.error(f"❌ 运行中出错: {str(e)}")
+
+# 页脚
+st.divider()
+st.caption("Powered by Gemini 2.0/2.5 & Streamlit")
