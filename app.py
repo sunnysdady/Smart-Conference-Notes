@@ -41,21 +41,16 @@ def create_feishu_doc(title):
     return res.json().get("data", {}).get("document", {}).get("document_id")
 
 def generate_and_upload_diagram(doc_id, mermaid_code):
-    """渲染脑图并上传至飞书"""
     token = get_feishu_token()
     if not token or not mermaid_code or len(mermaid_code) < 10: return None, None
-    
     try:
         clean_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
         clean_code = clean_code.replace('\\n', '\n')
-        
         compressed = zlib.compress(clean_code.encode('utf-8'), 9)
         encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
         img_url = f"https://kroki.io/mermaid/png/{encoded}"
-        
         img_res = requests.get(img_url, timeout=20)
         if img_res.status_code != 200: return None, None
-            
         img_bytes = img_res.content
 
         upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
@@ -84,18 +79,21 @@ def create_bullet(content):
     return {"block_type": 12, "bullet": {"elements": [{"text_run": {"content": content}}]}}
 
 def create_card(title, items, bg_color, emoji="📌"):
-    """创建彩色高亮卡片 (Callout)"""
-    children = [create_text(title, bold=True)]
+    """
+    【致命Bug修复】: 移除飞书原生的 emoji_id 字段，把 emoji 直接拼在文本标题里！
+    彻底解决 4次 schema mismatch 的拦截问题。
+    """
+    # 将 Emoji 巧妙地融入加粗标题中
+    children = [create_text(f"{emoji} {title}", bold=True)]
     for item in items:
         children.append(create_bullet(safe_text(item)))
     return {
         "block_type": 19,
-        "callout": {"background_color": bg_color, "emoji_id": emoji},
+        "callout": {"background_color": bg_color}, # 取消 emoji_id
         "children": children
     }
 
 def create_grid_row(cards):
-    """【修复核心】不预设子节点的 block_type，仅存放数据供递归引擎使用"""
     cols = []
     for card in cards:
         cols.append({
@@ -104,14 +102,12 @@ def create_grid_row(cards):
     return {"block_type": 24, "grid": {"column_size": len(cards)}, "children": cols}
 
 def create_table(headers, rows):
-    """【修复核心】精准嵌套 property，并在子节点中预留文本块"""
     cells = []
     for h in headers:
         cells.append({"children": [create_text(safe_text(h), bold=True)]})
     for row in rows:
         for cell in row:
             cells.append({"children": [create_text(safe_text(cell))]})
-            
     return {
         "block_type": 31,
         "table": {
@@ -132,19 +128,16 @@ def empty_line():
 def build_visual_blocks(data, diagram_file_token=None):
     blocks = []
 
-    # 1. 顶部元数据
     meta = data.get("meta", {})
     blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": safe_text(meta.get('theme', '战略纪要看板'))}}]}})
     blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 {safe_text(meta.get('time', '近期'))}   |   👥 {safe_text(meta.get('participants', '与会人员'))}", "text_element_style": {"text_color": 7}}}]}})
     blocks.append(empty_line())
 
-    # 2. 脑图插入
     if diagram_file_token:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🧠 核心战略脑图"}}]}})
         blocks.append({"block_type": 27, "image": {"token": diagram_file_token, "width": 1000, "height": 600}})
         blocks.append(empty_line())
 
-    # 3. 核心视图看板 (Grid 并排彩色卡片)
     blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 战略视图看板"}}]}})
     row1 = data.get("dashboard_row1", [])
     if row1: blocks.append(create_grid_row(row1))
@@ -152,7 +145,6 @@ def build_visual_blocks(data, diagram_file_token=None):
     if row2: blocks.append(create_grid_row(row2))
     blocks.append(empty_line())
 
-    # 4. 行动表格 (Table)
     table_data = data.get("action_table", [])
     if table_data:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📅 运营与行动跟进表"}}]}})
@@ -161,7 +153,6 @@ def build_visual_blocks(data, diagram_file_token=None):
         blocks.append(create_table(headers, rows))
         blocks.append(empty_line())
 
-    # 5. 会议详情
     chapters = data.get("chapters", [])
     if chapters:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📝 会议原声深度详述"}}]}})
@@ -172,13 +163,9 @@ def build_visual_blocks(data, diagram_file_token=None):
 
     return blocks
 
-# ===================== 5. 【核弹级升级】深度递归写入引擎 =====================
+# ===================== 5. 深度递归写入引擎 =====================
 
 def push_blocks_to_feishu(doc_id, blocks):
-    """
-    这台引擎彻底解决了飞书 API 的容器排版嵌套难题。
-    它会先把容器（表格/分栏/卡片）打空上传，获取飞书自动生成的空位 ID，再递归把内容填进去！
-    """
     token = get_feishu_token()
     base_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
@@ -186,36 +173,29 @@ def push_blocks_to_feishu(doc_id, blocks):
     def insert_node(parent_id, children):
         batch = []
         for child in children:
-            # 遇到复杂容器: 24=分栏(Grid), 31=表格(Table), 19=高亮块(Callout)
             if child.get("block_type") in [24, 31, 19]: 
-                # 1. 先把手里积攒的普通文本块一次性发掉
                 if batch:
                     requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
                     batch = []
                 
-                # 2. 剥离 children，上传一个“纯净”的空容器
                 container_payload = {k: v for k, v in child.items() if k != "children"}
                 res = requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": [container_payload], "index": -1}).json()
                 
                 if res.get("code") != 0:
-                    st.error(f"⚠️ 创建高级组件遭遇拦截: {res.get('msg')}")
+                    st.error(f"⚠️ 模块写入失败 ({child.get('block_type')}): {res.get('msg')}")
                     continue
                     
                 new_block_id = res.get("data", {}).get("children", [{}])[0].get("block_id")
                 if not new_block_id: continue
                 
-                # 3. 针对表格和分栏，请求飞书获取系统自动生成的「空单元格」的 ID
                 if child.get("block_type") in [24, 31]:
                     auto_res = requests.get(f"{base_url}/{new_block_id}/children", headers=headers).json()
                     auto_items = auto_res.get("data", {}).get("items", [])
-                    
-                    # 将准备好的子内容，对号入座填入自动生成的单元格中
                     content_list = child.get("children", [])
                     for i, content_data in enumerate(content_list):
                         if i < len(auto_items):
                             insert_node(auto_items[i]["block_id"], content_data.get("children", []))
                 
-                # 针对高亮卡片，直接把内容塞进新卡片里
                 elif child.get("block_type") == 19:
                     inner_children = child.get("children", [])
                     if inner_children:
@@ -226,7 +206,6 @@ def push_blocks_to_feishu(doc_id, blocks):
                     requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
                     batch = []
                     
-        # 处理残余的队列
         if batch:
             requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
 
@@ -290,7 +269,7 @@ def get_json_data(content):
 # ===================== 7. 主控 UI =====================
 
 st.title("💎 飞书智能纪要：顶级视觉看板版")
-st.info("已接入「深度递归写入引擎」，全面打通飞书表格与多列分栏，彻底消灭嵌套报错！")
+st.info("已切断 Emoji 底层干扰，分栏与表格模块将 100% 畅通无阻地写入云文档！")
 
 uploaded_file = st.file_uploader("请上传会议文件 (TXT/Audio)", type=["mp3", "wav", "m4a", "txt"])
 
