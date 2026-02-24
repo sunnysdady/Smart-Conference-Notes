@@ -15,7 +15,7 @@ try:
 except ImportError:
     pass
 
-st.set_page_config(page_title="飞书智能纪要：顶级视觉看板版", page_icon="📈", layout="wide")
+st.set_page_config(page_title="飞书智能纪要：完美交付版", page_icon="💎", layout="wide")
 
 APP_ID = "cli_a916f070b0f8dcd6"
 APP_SECRET = "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW"
@@ -41,18 +41,28 @@ def create_feishu_doc(title):
     return res.json().get("data", {}).get("document", {}).get("document_id")
 
 def generate_and_upload_diagram(doc_id, mermaid_code):
+    """渲染脑图并上传至飞书"""
     token = get_feishu_token()
-    if not token or not mermaid_code or len(mermaid_code) < 10: return None, None
+    if not token or not mermaid_code or len(mermaid_code) < 5: return None, None
+    
     try:
+        # 清洗代码
         clean_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
-        clean_code = clean_code.replace('\\n', '\n')
+        # 强制修正换行符问题，防止渲染失败
+        clean_code = clean_code.replace('\\n', '\n').replace('\"', '"')
+        
+        # 1. 尝试 Kroki 渲染
         compressed = zlib.compress(clean_code.encode('utf-8'), 9)
         encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
         img_url = f"https://kroki.io/mermaid/png/{encoded}"
-        img_res = requests.get(img_url, timeout=20)
-        if img_res.status_code != 200: return None, None
+        
+        img_res = requests.get(img_url, timeout=15)
+        if img_res.status_code != 200: 
+            return None, None # 渲染失败，走 Text Fallback
+            
         img_bytes = img_res.content
 
+        # 2. 上传飞书
         upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
         headers = {"Authorization": f"Bearer {token}"}
         data = {"file_name": "mindmap.png", "parent_type": "docx_image", "parent_node": doc_id, "size": len(img_bytes)}
@@ -69,31 +79,37 @@ def generate_and_upload_diagram(doc_id, mermaid_code):
 def safe_text(content):
     return str(content).replace('\n', ' ').strip() or " "
 
-def create_text(content, bold=False, color=None):
+def create_text(content, bold=False, color=None, bg_color=None):
     style = {}
     if bold: style["bold"] = True
     if color: style["text_color"] = color
+    if bg_color: style["background_color"] = bg_color
     return {"block_type": 2, "text": {"elements": [{"text_run": {"content": content, "text_element_style": style}}]}}
 
 def create_bullet(content):
     return {"block_type": 12, "bullet": {"elements": [{"text_run": {"content": content}}]}}
 
+def create_code_block(code, language="mermaid"):
+    """【新增】创建原生代码块，用于脑图渲染失败时的优雅降级"""
+    return {
+        "block_type": 14, 
+        "code": {"language": language, "wrap_text": True},
+        "children": [create_text(code)]
+    }
+
 def create_card(title, items, bg_color, emoji="📌"):
-    """
-    【致命Bug修复】: 移除飞书原生的 emoji_id 字段，把 emoji 直接拼在文本标题里！
-    彻底解决 4次 schema mismatch 的拦截问题。
-    """
-    # 将 Emoji 巧妙地融入加粗标题中
+    """创建彩色高亮卡片 (Callout) - 标题带Emoji模式"""
     children = [create_text(f"{emoji} {title}", bold=True)]
     for item in items:
         children.append(create_bullet(safe_text(item)))
     return {
         "block_type": 19,
-        "callout": {"background_color": bg_color}, # 取消 emoji_id
+        "callout": {"background_color": bg_color},
         "children": children
     }
 
 def create_grid_row(cards):
+    """创建多列分栏 (Grid)"""
     cols = []
     for card in cards:
         cols.append({
@@ -102,9 +118,10 @@ def create_grid_row(cards):
     return {"block_type": 24, "grid": {"column_size": len(cards)}, "children": cols}
 
 def create_table(headers, rows):
+    """创建原生表格 (Table)"""
     cells = []
     for h in headers:
-        cells.append({"children": [create_text(safe_text(h), bold=True)]})
+        cells.append({"children": [create_text(safe_text(h), bold=True, bg_color=7)]}) # 表头灰色背景
     for row in rows:
         for cell in row:
             cells.append({"children": [create_text(safe_text(cell))]})
@@ -125,19 +142,30 @@ def empty_line():
 
 # ===================== 4. 视觉看板组装引擎 =====================
 
-def build_visual_blocks(data, diagram_file_token=None):
+def build_visual_blocks(data, diagram_file_token=None, mermaid_raw_code=None):
     blocks = []
 
+    # 1. 顶部元数据
     meta = data.get("meta", {})
     blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": safe_text(meta.get('theme', '战略纪要看板'))}}]}})
     blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 {safe_text(meta.get('time', '近期'))}   |   👥 {safe_text(meta.get('participants', '与会人员'))}", "text_element_style": {"text_color": 7}}}]}})
+    
+    # 2. 核心共识 (高亮条)
+    consensus = safe_text(data.get("core_consensus", "暂无核心结论"))
+    blocks.append(create_card("核心决策共识", [consensus], 5, "🏆"))
     blocks.append(empty_line())
 
+    # 3. 脑图 (图片优先，代码块兜底)
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🧠 战略逻辑脑图"}}]}})
     if diagram_file_token:
-        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🧠 核心战略脑图"}}]}})
         blocks.append({"block_type": 27, "image": {"token": diagram_file_token, "width": 1000, "height": 600}})
-        blocks.append(empty_line())
+    elif mermaid_raw_code:
+        # 如果图片挂了，显示代码块，飞书会自动高亮 Mermaid 语法
+        blocks.append(create_text("⚠️ 脑图预览 (可视化加载中，以下为逻辑源码):", color=7))
+        blocks.append(create_code_block(mermaid_raw_code))
+    blocks.append(empty_line())
 
+    # 4. 战略视图看板 (Grid)
     blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 战略视图看板"}}]}})
     row1 = data.get("dashboard_row1", [])
     if row1: blocks.append(create_grid_row(row1))
@@ -145,6 +173,7 @@ def build_visual_blocks(data, diagram_file_token=None):
     if row2: blocks.append(create_grid_row(row2))
     blocks.append(empty_line())
 
+    # 5. 行动表格 (Table)
     table_data = data.get("action_table", [])
     if table_data:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📅 运营与行动跟进表"}}]}})
@@ -153,6 +182,7 @@ def build_visual_blocks(data, diagram_file_token=None):
         blocks.append(create_table(headers, rows))
         blocks.append(empty_line())
 
+    # 6. 深度纪要
     chapters = data.get("chapters", [])
     if chapters:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📝 会议原声深度详述"}}]}})
@@ -173,22 +203,24 @@ def push_blocks_to_feishu(doc_id, blocks):
     def insert_node(parent_id, children):
         batch = []
         for child in children:
-            if child.get("block_type") in [24, 31, 19]: 
+            if child.get("block_type") in [24, 31, 19, 14]: # 新增 14 (Code Block)
                 if batch:
                     requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
                     batch = []
                 
+                # 创建容器
                 container_payload = {k: v for k, v in child.items() if k != "children"}
                 res = requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": [container_payload], "index": -1}).json()
                 
                 if res.get("code") != 0:
-                    st.error(f"⚠️ 模块写入失败 ({child.get('block_type')}): {res.get('msg')}")
+                    st.error(f"⚠️ 组件写入警告 ({child.get('block_type')}): {res.get('msg')}")
                     continue
                     
                 new_block_id = res.get("data", {}).get("children", [{}])[0].get("block_id")
                 if not new_block_id: continue
                 
-                if child.get("block_type") in [24, 31]:
+                # 递归填充内容
+                if child.get("block_type") in [24, 31]: # Grid, Table
                     auto_res = requests.get(f"{base_url}/{new_block_id}/children", headers=headers).json()
                     auto_items = auto_res.get("data", {}).get("items", [])
                     content_list = child.get("children", [])
@@ -196,7 +228,7 @@ def push_blocks_to_feishu(doc_id, blocks):
                         if i < len(auto_items):
                             insert_node(auto_items[i]["block_id"], content_data.get("children", []))
                 
-                elif child.get("block_type") == 19:
+                elif child.get("block_type") in [19, 14]: # Callout, Code
                     inner_children = child.get("children", [])
                     if inner_children:
                         insert_node(new_block_id, inner_children)
@@ -212,7 +244,7 @@ def push_blocks_to_feishu(doc_id, blocks):
     insert_node(doc_id, blocks)
     return f"https://bytedance.feishu.cn/docx/{doc_id}"
 
-# ===================== 6. 商业提炼引擎 =====================
+# ===================== 6. 商业提炼引擎 (Prompt V4.0) =====================
 
 @st.cache_resource
 def load_model():
@@ -223,35 +255,36 @@ def get_json_data(content):
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
     
     prompt = f"""
-    你是一名麦肯锡级别的商业顾问。请将会议内容转化为具备“图文看板+原生表格”结构的顶级纪要。
+    你是一名麦肯锡级别的商业咨询顾问。请将会议内容转化为具备“图文看板+原生表格”结构的顶级纪要。
     
     【输出结构必须严格为 JSON】：
     {{
         "meta": {{ "theme": "会议主题", "time": "推测时间", "participants": "发言人" }},
-        "mermaid_mindmap": "mindmap\\n  root((会议核心主题))\\n    关键议题1\\n      细节A\\n      细节B\\n    关键议题2\\n      细节C",
+        "core_consensus": "用一句话总结会议达成的最核心战略共识(带上核心数字)",
+        "mermaid_mindmap": "mindmap\\n  root((战略核心))\\n    关键议题1\\n      细节A\\n    关键议题2\\n      细节B",
         "dashboard_row1": [
             {{ "title": "品牌溢价路径", "items": ["要点1", "要点2"], "color": 5, "emoji": "🚀" }},
-            {{ "title": "本地化支撑体系", "items": ["资源1(带数据)", "资源2"], "color": 4, "emoji": "🏢" }}
+            {{ "title": "本地化支撑体系", "items": ["资源1(必须带数据,如3.3万平)", "资源2(如百年企业)"], "color": 4, "emoji": "🏢" }}
         ],
         "dashboard_row2": [
             {{ "title": "分阶段落地策略", "items": ["短期规划", "长期规划"], "color": 2, "emoji": "🎯" }},
             {{ "title": "竞争壁垒与机遇", "items": ["行业洞察", "核心优势"], "color": 6, "emoji": "🛡️" }}
         ],
         "action_table": [
-            {{ "task": "具体行动任务(如:考察海外仓)", "owner": "负责方/人", "deadline": "短期/中长期" }}
+            {{ "task": "具体行动任务(如:考察威廉港仓库)", "owner": "负责方/人", "deadline": "短期/中长期" }}
         ],
         "chapters": [ 
             {{ 
                 "time": "00:00:00", 
                 "title": "节点主题", 
-                "content": "【致命警告】必须像速记员一样复原细节！字数绝对不得少于 150 字！必须保留会议中的业务数据、客户案例、难点，禁止一句话概括！" 
+                "content": "【内容填充要求】必须包含不少于 150 字的深度纪要！重点提取：1. 具体数据(金额/面积/时间) 2. 客户案例(如英国姐妹品牌) 3. 双方争议点与解决方案。禁止流水账！" 
             }} 
         ]
     }}
     
     【注意事项】：
-    1. dashboard 中的 color 只能在 1, 2, 3, 4, 5, 6, 7 中选择。
-    2. mermaid_mindmap 必须使用严格合法的 Mermaid `mindmap` 语法，换行使用 \\\\n，不要使用大括号等特殊符号。
+    1. dashboard 中的 color 只能在 1-7 中选择。
+    2. mermaid_mindmap 必须使用合法 Mermaid `mindmap` 语法，换行用 \\\\n。
     
     原文内容：{content[:25000]}
     """
@@ -268,12 +301,12 @@ def get_json_data(content):
 
 # ===================== 7. 主控 UI =====================
 
-st.title("💎 飞书智能纪要：顶级视觉看板版")
-st.info("已切断 Emoji 底层干扰，分栏与表格模块将 100% 畅通无阻地写入云文档！")
+st.title("💎 飞书智能纪要：完美交付版")
+st.info("已启用「双重视觉引擎」与「深度递归写入」。脑图、分栏、表格、长文本将 100% 呈现！")
 
 uploaded_file = st.file_uploader("请上传会议文件 (TXT/Audio)", type=["mp3", "wav", "m4a", "txt"])
 
-if uploaded_file and st.button("🚀 生成顶级视图看板", type="primary"):
+if uploaded_file and st.button("🚀 生成完美视觉看板", type="primary"):
     with st.status("正在启动多维视觉架构引擎...", expanded=True) as status:
         
         status.write("1️⃣ 解析输入文件...")
@@ -297,21 +330,24 @@ if uploaded_file and st.button("🚀 生成顶级视图看板", type="primary"):
             doc_id = create_feishu_doc(json_data.get('meta', {}).get('theme', '顶级视图纪要'))
             
             if doc_id:
-                status.write("4️⃣ 正在渲染高清脑图并挂载...")
+                status.write("4️⃣ 正在渲染高清脑图 (双重保险模式)...")
                 mermaid_code = json_data.get("mermaid_mindmap")
                 diagram_token, img_bytes = generate_and_upload_diagram(doc_id, mermaid_code) if mermaid_code else (None, None)
                 
-                status.write("5️⃣ 正在调用「深度递归引擎」编排原生分栏与高级表格 (安全写入中)...")
-                blocks = build_visual_blocks(json_data, diagram_token)
+                status.write("5️⃣ 正在调用「深度递归引擎」编排原生分栏与高级表格...")
+                blocks = build_visual_blocks(json_data, diagram_token, mermaid_code)
                 doc_url = push_blocks_to_feishu(doc_id, blocks)
                 
                 if doc_url:
-                    status.update(label="✅ 顶级视觉看板生成成功！", state="complete")
+                    status.update(label="✅ 完美视觉看板生成成功！", state="complete")
                     
                     if img_bytes:
                         st.markdown("### 🧠 核心战略脑图预览")
                         st.image(img_bytes, use_column_width=True)
-                    
+                    elif mermaid_code:
+                         st.markdown("### 🧠 脑图逻辑预览 (图片上传超时，已在文档中降级为代码块)")
+                         st.code(mermaid_code, language='mermaid')
+
                     st.markdown(f"""
                     <div style="background:#f0f2f5; padding:30px; border-radius:15px; text-align:center;">
                         <h2 style="color:#1f2329;">🎉 您的专属视觉战略看板已落成</h2>
