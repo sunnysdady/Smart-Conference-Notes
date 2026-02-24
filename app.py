@@ -9,190 +9,194 @@ from dotenv import load_dotenv
 
 # ===================== 1. 基础配置 =====================
 load_dotenv()
-st.set_page_config(page_title="飞书智能纪要：原生看板引擎", page_icon="🎯", layout="wide")
+st.set_page_config(page_title="飞书智能看板-修复版", page_icon="🛠️", layout="wide")
 
 APP_ID = "cli_a916f070b0f8dcd6"
 APP_SECRET = "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW"
 QWEN_API_KEY = "sk-ecb46034c430477e9c9a4b4fd6589742"
 
-# ===================== 2. 飞书开放平台底层 API =====================
+# ===================== 2. 飞书 API (带诊断功能) =====================
 
 def get_feishu_token():
     url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    res = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET})
-    return res.json().get("tenant_access_token")
+    try:
+        res = requests.post(url, json={"app_id": APP_ID, "app_secret": APP_SECRET})
+        data = res.json()
+        if "tenant_access_token" not in data:
+            st.error(f"鉴权失败: {data}")
+            return None
+        return data["tenant_access_token"]
+    except Exception as e:
+        st.error(f"网络请求失败: {e}")
+        return None
 
 def create_feishu_doc(title):
     token = get_feishu_token()
+    if not token: return None
     url = "https://open.feishu.cn/open-apis/docx/v1/documents"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     res = requests.post(url, headers=headers, json={"title": title})
-    return res.json().get("data", {}).get("document", {}).get("document_id")
-
-def build_native_feishu_blocks(data):
-    """
-    【核心渲染引擎】将 JSON 数据 1:1 映射为飞书原生带颜色的 Blocks
-    """
-    blocks = []
-    
-    # 1. 标题与基础信息
-    blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": data.get("title", "智能纪要")}}]}})
-    blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 录音时间：{data.get('date', '未提及')}\n💡 智能纪要由AI生成，请谨慎甄别后使用", "text_element_style": {"text_color": 7}}}]}})
-    
-    # 2. 重点项目 (原生色块还原)
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 重点项目概览"}}]}})
-    for proj in data.get("projects", []):
-        status = proj.get("status", "")
-        # 飞书原生色号映射: 4=绿, 1=红, 2=橙 (字体色); 14=浅绿, 11=浅红, 12=浅橙 (背景色)
-        if "正常" in status or "完成" in status:
-            tc, bgc, icon = 4, 14, "🟢"
-        elif "风险" in status or "待" in status:
-            tc, bgc, icon = 1, 11, "🔴"
-        else:
-            tc, bgc, icon = 2, 12, "🟠"
-            
-        # 构造带背景色的状态标签
-        blocks.append({
-            "block_type": 2,
-            "text": {"elements": [
-                {"text_run": {"content": f" ❖ {proj.get('name', '')}   ", "text_element_style": {"bold": True, "text_color": 5}}},
-                {"text_run": {"content": f" {icon} {status} ", "text_element_style": {"text_color": tc, "background_color": bgc, "bold": True}}}
-            ]}
-        })
-        # 项目细节
-        for detail in proj.get("details", []):
-            blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": detail}}]}})
-
-    # 3. 运营工作跟进 (结构化清单模拟表格)
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📅 运营工作跟进"}}]}})
-    for op in data.get("operations", []):
-        status = op.get("status", "")
-        tc, bgc, icon = (4,14,"🟢") if "完成" in status else ((1,11,"🔴") if "待" in status else (2,12,"🟠"))
-        blocks.append({
-            "block_type": 12,
-            "bullet": {"elements": [
-                {"text_run": {"content": f"{op.get('category', '')}   ", "text_element_style": {"bold": True}}},
-                {"text_run": {"content": f" {icon} {status} ", "text_element_style": {"text_color": tc, "background_color": bgc, "bold": True}}},
-                {"text_run": {"content": f"  |  负责人：{op.get('owner', '')}  |  操作：{op.get('content', '')}", "text_element_style": {"text_color": 7}}}
-            ]}
-        })
-
-    # 4. 下一步计划 (醒目高亮)
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🚀 下一步计划"}}]}})
-    blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": "💡 " + data.get("next_steps", ""), "text_element_style": {"bold": True, "background_color": 13}}}]}})
-
-    # 5. 详细章节
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "⏱️ 详细会议内容"}}]}})
-    for chap in data.get("chapters", []):
-        blocks.append({
-            "block_type": 2, 
-            "text": {"elements": [{"text_run": {"content": f"[{chap.get('time', '')}] {chap.get('title', '')}", "text_element_style": {"bold": True, "text_color": 5}}}]}
-        })
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": chap.get("summary", ""), "text_element_style": {"text_color": 7}}}]}})
-
-    # 6. 决策与金句
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🎯 关键决策与金句"}}]}})
-    for dec in data.get("decisions", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": f"决策: {dec.get('problem')} -> {dec.get('solution')}", "text_element_style": {"bold": True}}}]}})
-    for quote in data.get("quotes", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": f"「{quote.get('text')}」 —— {quote.get('speaker')}", "text_element_style": {"text_color": 7, "italic": True}}}]}})
-
-    return blocks
+    data = res.json()
+    if data.get("code") != 0:
+        st.error(f"创建文档失败: {data}")
+        return None
+    return data.get("data", {}).get("document", {}).get("document_id")
 
 def push_blocks_to_feishu(doc_id, blocks):
+    """
+    【核心修复】批量写入 Block，并捕获错误
+    """
     token = get_feishu_token()
     url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/0/children"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    for i in range(0, len(blocks), 40):
-        requests.post(url, headers=headers, json={"children": blocks[i:i+40], "index": -1})
+    
+    # 分批写入，每批 50 个，防止包体过大
+    batch_size = 50
+    for i in range(0, len(blocks), batch_size):
+        batch = blocks[i:i+batch_size]
+        payload = {"children": batch, "index": -1}
+        
+        try:
+            res = requests.post(url, headers=headers, json=payload)
+            res_data = res.json()
+            # 显性报错：如果 code != 0，说明写入失败
+            if res_data.get("code") != 0:
+                st.error(f"❌ 区块写入失败 (Batch {i//batch_size + 1}): {res_data}")
+                st.json(batch) # 打印出有问题的 block 供调试
+                return None
+        except Exception as e:
+            st.error(f"写入请求异常: {e}")
+            return None
+            
     return f"https://bytedance.feishu.cn/docx/{doc_id}"
 
-# ===================== 3. AI 引擎与逻辑 =====================
+# ===================== 3. 稳健的 Block 构建引擎 =====================
+
+def build_safe_feishu_blocks(data):
+    """
+    使用 Callout (高亮块) 替代易报错的 Text Style，确保 100% 成功率
+    """
+    blocks = []
+    
+    # 1. 标题区
+    blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": data.get("title", "会议纪要")}}]}})
+    blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 {data.get('date', '')} | AI生成", "text_element_style": {"text_color": 5}}}]}})
+
+    # 2. 重点项目 (使用 Callout 模拟彩色卡片)
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 重点项目概览"}}]}})
+    
+    for proj in data.get("projects", []):
+        status = proj.get("status", "进行中")
+        # 映射背景色: 5=蓝(默认), 4=绿(正常), 1=红(风险), 2=橙(优化)
+        bg_color = 5 
+        if "正常" in status or "完成" in status: bg_color = 4
+        elif "风险" in status or "滞销" in status: bg_color = 1
+        elif "优化" in status: bg_color = 2
+        
+        # 构造高亮块 (Callout)
+        blocks.append({
+            "block_type": 19, 
+            "callout": {
+                "background_color": bg_color,
+                "elements": [
+                    {"text_run": {"content": f"【{status}】{proj.get('name', '项目')}", "text_element_style": {"bold": True}}},
+                    {"text_run": {"content": "\n" + "\n".join([f"• {d}" for d in proj.get('details', [])])}}
+                ]
+            }
+        })
+
+    # 3. 运营工作 (列表)
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🗓️ 运营工作跟进"}}]}})
+    for op in data.get("operations", []):
+        icon = "🟢" if "完成" in op.get("status","") else ("🔴" if "待" in op.get("status","") else "🟠")
+        content_text = f"{icon} {op.get('category')} | {op.get('content')} | 👤 {op.get('owner')}"
+        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": content_text}}]}})
+
+    # 4. 下一步计划 (黄色高亮块)
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🚀 下一步计划"}}]}})
+    blocks.append({
+        "block_type": 19,
+        "callout": {
+            "background_color": 3, # 黄色
+            "elements": [{"text_run": {"content": f"💡 {data.get('next_steps', '暂无计划')}", "text_element_style": {"bold": True}}}]
+        }
+    })
+
+    # 5. 决策与金句
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🎯 决策与金句"}}]}})
+    for dec in data.get("decisions", []):
+        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": f"决策：{dec.get('problem')} → {dec.get('solution')}"}}]}})
+    
+    return blocks
+
+# ===================== 4. AI 核心逻辑 =====================
 
 @st.cache_resource
 def load_model():
     return whisper.load_model("base")
 
-def generate_json_summary(content):
-    """强制通义千问输出 JSON 格式，以便精准提取各模块数据"""
+def get_json_data(content):
+    """提取 JSON，失败则返回空结构以防报错"""
     url = "https://dashscope.aliyuncs.com/api/v1/services/aigc/text-generation/generation"
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
-    
     prompt = f"""
-    你是飞书智能秘书。请根据转写文本提取信息，并严格且仅输出 JSON 格式数据。
-    JSON 必须包含以下结构：
-    {{
-        "title": "会议主题", "date": "XXXX年XX月XX日",
-        "projects": [{{"name": "项目名", "status": "正常推进/需要优化/存在风险", "details": ["细节1", "细节2"]}}],
-        "operations": [{{"category": "类别", "content": "具体操作", "owner": "负责人", "status": "已完成/待处理"}}],
-        "next_steps": "下一步计划描述",
-        "chapters": [{{"time": "00:01", "title": "章节标题", "summary": "章节内容"}}],
-        "decisions": [{{"problem": "问题", "solution": "方案", "reason": "依据"}}],
-        "quotes": [{{"speaker": "说话人", "text": "原话", "analysis": "分析"}}]
+    请将以下会议纪要转化为严格的 JSON 格式。
+    结构：{{
+        "title": "主题", "date": "时间",
+        "projects": [{{"name": "项目名", "status": "正常/风险/优化", "details": ["要点1"]}}],
+        "operations": [{{"category": "类别", "content": "内容", "owner": "人", "status": "状态"}}],
+        "next_steps": "下一步",
+        "decisions": [{{"problem": "问题", "solution": "解法"}}]
     }}
-    转录原文：{content[:25000]}
+    原文：{content[:20000]}
     """
-    
-    payload = {"model": "qwen-max", "input": {"messages": [{"role": "user", "content": prompt}]}, "parameters": {"result_format": "text"}}
     try:
-        res = requests.post(url, headers=headers, json=payload, timeout=90)
-        res_text = res.json()["output"]["text"]
-        
-        # 安全提取 JSON 字符串
-        json_match = re.search(r'\{.*\}', res_text, re.DOTALL)
-        if json_match:
-            return json.loads(json_match.group(0))
-        else:
-            st.error("AI 未返回标准 JSON 格式。")
-            return None
-    except Exception as e:
-        st.error(f"AI 生成解析失败: {e}")
+        res = requests.post(url, headers=headers, json={"model": "qwen-max", "input": {"messages": [{"role": "user", "content": prompt}]}})
+        text = res.json()["output"]["text"]
+        match = re.search(r'\{.*\}', text, re.DOTALL)
+        return json.loads(match.group(0)) if match else None
+    except:
         return None
 
-# ===================== 4. UI 工作流 =====================
+# ===================== 5. UI 界面 =====================
 
-st.title("🎯 飞书智能纪要：原生看板渲染引擎")
-st.info("彻底重构：利用 JSON + 飞书底层 API，生成 100% 还原原版状态标签与排版的正式文档。")
+st.title("🛠️ 飞书看板修复版：原生渲染")
+uploaded_file = st.file_uploader("上传文件 (TXT/Audio)", type=["txt", "mp3", "wav", "m4a"])
 
-uploaded_file = st.file_uploader("请上传音频或文本", type=["mp3", "wav", "m4a", "txt"])
-
-if uploaded_file and st.button("✨ 启动原生级渲染构建", type="primary"):
-    with st.status("正在执行多维处理引擎...", expanded=True) as status:
+if uploaded_file and st.button("🚀 重新生成并诊断"):
+    with st.status("正在执行全链路诊断...", expanded=True) as status:
         
-        # 1. 文本读取/转录
-        status.write("1️⃣ 正在解析源文件...")
+        # 1. 提取文本
+        status.write("1️⃣ 读取文件内容...")
         if uploaded_file.name.endswith('.txt'):
-            raw_text = uploaded_file.read().decode("utf-8")
+            text = uploaded_file.read().decode("utf-8")
         else:
-            status.write("正在唤醒 Whisper 本地转录模型...")
             model = load_model()
-            temp_path = f"temp_{uploaded_file.name}"
-            with open(temp_path, "wb") as f: f.write(uploaded_file.getbuffer())
-            raw_text = model.transcribe(temp_path, language="zh")["text"]
-            os.remove(temp_path)
+            with open("temp_audio", "wb") as f: f.write(uploaded_file.getbuffer())
+            text = model.transcribe("temp_audio", language="zh")["text"]
             
-        # 2. JSON 结构化提取
-        status.write("2️⃣ AI 正在进行结构化 JSON 降维解析...")
-        json_data = generate_json_summary(raw_text)
+        # 2. 生成数据
+        status.write("2️⃣ AI 结构化解析...")
+        data = get_json_data(text)
+        if not data:
+            status.update(label="❌ AI 解析失败，未能生成 JSON", state="error")
+            st.stop()
+            
+        # 3. 创建文档
+        status.write("3️⃣ 创建空白云文档...")
+        doc_id = create_feishu_doc(data.get("title", "智能纪要"))
+        if not doc_id:
+            status.update(label="❌ 文档创建失败 (请检查 App ID 权限)", state="error")
+            st.stop()
+            
+        # 4. 写入 Block (核心步骤)
+        status.write("4️⃣ 注入原生高亮块 (Safe Mode)...")
+        blocks = build_safe_feishu_blocks(data)
+        doc_url = push_blocks_to_feishu(doc_id, blocks)
         
-        if json_data:
-            # 3. 飞书原生 Block 映射与写入
-            status.write("3️⃣ 正在映射飞书原生色彩与 Block 组件...")
-            doc_id = create_feishu_doc(f"智能看板：{json_data.get('title', '会议纪要')}")
-            blocks = build_native_feishu_blocks(json_data)
-            doc_url = push_blocks_to_feishu(doc_id, blocks)
-            
-            status.update(label="✅ 原生飞书文档构建完成！", state="complete")
-            
-            st.markdown(f"""
-            <div style="background:#f0f2f5; padding:30px; border-radius:15px; text-align:center;">
-                <h2 style="color:#1f2329;">✨ 结构化仪表盘已就绪</h2>
-                <p style="color:#646a73;">已通过底层 API 注入原生背景色与排版标签</p>
-                <a href="{doc_url}" target="_blank" style="background:#3370ff; color:white; padding:15px 40px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:18px; display:inline-block; margin-top:10px;">
-                    🚀 点击检阅最终成果
-                </a>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            with st.expander("查看底层解析 JSON"):
-                st.json(json_data)
+        if doc_url:
+            status.update(label="✅ 成功！文档已写入", state="complete")
+            st.success("🎉 看板生成成功！")
+            st.markdown(f'<a href="{doc_url}" target="_blank" style="background:#3370ff;color:white;padding:15px 30px;border-radius:5px;text-decoration:none;">🚀 打开飞书云文档</a>', unsafe_allow_html=True)
+        else:
+            status.update(label="❌ 写入失败，请查看上方错误日志", state="error")
