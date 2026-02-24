@@ -97,7 +97,7 @@ def create_card(title, items, bg_color, emoji="📌"):
     }
 
 def create_grid_row(cards):
-    """【重磅升级】创建多列分栏 (Grid)，实现左右并排卡片布局"""
+    """创建多列分栏 (Grid)，实现左右并排卡片布局"""
     cols = []
     for card in cards:
         cols.append({
@@ -107,16 +107,26 @@ def create_grid_row(cards):
     return {"block_type": 24, "grid": {"column_size": len(cards)}, "children": cols}
 
 def create_table(headers, rows):
-    """【重磅升级】创建原生表格 (Table)"""
+    """【致命Bug已修复】正确嵌套 Table 的 row_size 和 column_size 参数"""
     cells = []
+    # 填充表头
     for h in headers:
         cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(h), bold=True)]})
+    # 填充表格内容
     for row in rows:
         for cell in row:
             cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(cell))]})
+            
+    # 【修复点】：飞书严格要求 row_size 和 column_size 必须包裹在 property 字典内部！
     return {
         "block_type": 31,
-        "table": {"row_size": len(rows) + 1, "column_size": len(headers), "property": {"header_row": True}},
+        "table": {
+            "property": {
+                "row_size": len(rows) + 1,
+                "column_size": len(headers),
+                "header_row": True
+            }
+        },
         "children": cells
     }
 
