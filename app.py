@@ -4,17 +4,18 @@ import json
 import os
 import re
 import whisper
+import base64
+import zlib
 from datetime import datetime
 
-# 兼容 dotenv
+# ===================== 1. 基础配置 =====================
 try:
     from dotenv import load_dotenv
     load_dotenv()
 except ImportError:
     pass
 
-# ===================== 1. 基础配置 =====================
-st.set_page_config(page_title="飞书原生纪要：商业战略看板版", page_icon="💎", layout="wide")
+st.set_page_config(page_title="飞书智能纪要：顶级视觉看板版", page_icon="📈", layout="wide")
 
 APP_ID = "cli_a916f070b0f8dcd6"
 APP_SECRET = "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW"
@@ -35,88 +36,134 @@ def create_feishu_doc(title):
     if not token: return None
     url = "https://open.feishu.cn/open-apis/docx/v1/documents"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
-    safe_title = str(title).strip() if title else "战略会议纪要"
+    safe_title = str(title).strip() if title else "高密度图文纪要"
     res = requests.post(url, headers=headers, json={"title": safe_title})
     return res.json().get("data", {}).get("document", {}).get("document_id")
 
-# ===================== 3. 原生 Dashboard 构建器 =====================
+def generate_and_upload_diagram(doc_id, mermaid_code):
+    """渲染脑图并上传至飞书"""
+    token = get_feishu_token()
+    if not token or not mermaid_code or len(mermaid_code) < 10: return None, None
+    
+    try:
+        clean_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
+        clean_code = clean_code.replace('\\n', '\n')
+        
+        # 压缩编码请求 Kroki
+        compressed = zlib.compress(clean_code.encode('utf-8'), 9)
+        encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
+        img_url = f"https://kroki.io/mermaid/png/{encoded}"
+        
+        img_res = requests.get(img_url, timeout=20)
+        if img_res.status_code != 200: return None, None
+            
+        img_bytes = img_res.content
+
+        # 上传飞书
+        upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
+        headers = {"Authorization": f"Bearer {token}"}
+        data = {"file_name": "mindmap.png", "parent_type": "docx_image", "parent_node": doc_id, "size": len(img_bytes)}
+        files = {"file": ("mindmap.png", img_bytes, "image/png")}
+        
+        up_res = requests.post(upload_url, headers=headers, data=data, files=files, timeout=15)
+        if up_res.json().get("code") != 0: return None, img_bytes
+        return up_res.json().get("data", {}).get("file_token"), img_bytes
+    except Exception:
+        return None, None
+
+# ===================== 3. 飞书底层复杂组件构建器 =====================
 
 def safe_text(content):
     return str(content).replace('\n', ' ').strip() or " "
 
-def empty_line():
-    return {"block_type": 2, "text": {"elements": [{"text_run": {"content": " "}}]}}
+def create_text(content, bold=False, color=None):
+    style = {}
+    if bold: style["bold"] = True
+    if color: style["text_color"] = color
+    return {"block_type": 2, "text": {"elements": [{"text_run": {"content": content, "text_element_style": style}}]}}
 
-def build_dashboard_blocks(data):
-    """
-    【商业看板排版引擎】：
-    利用飞书原生的高亮背景色，模拟出精美的分块数据卡片 (Dashboard)
-    """
+def create_bullet(content):
+    return {"block_type": 12, "bullet": {"elements": [{"text_run": {"content": content}}]}}
+
+def create_card(title, items, bg_color, emoji="📌"):
+    """创建彩色高亮卡片 (Callout)"""
+    children = [create_text(title, bold=True)]
+    for item in items:
+        children.append(create_bullet(safe_text(item)))
+    return {
+        "block_type": 19,
+        "callout": {"background_color": bg_color, "emoji_id": emoji},
+        "children": children
+    }
+
+def create_grid_row(cards):
+    """【重磅升级】创建多列分栏 (Grid)，实现左右并排卡片布局"""
+    cols = []
+    for card in cards:
+        cols.append({
+            "block_type": 25, "grid_column": {},
+            "children": [create_card(card.get("title", ""), card.get("items", []), card.get("color", 5), card.get("emoji", "💡"))]
+        })
+    return {"block_type": 24, "grid": {"column_size": len(cards)}, "children": cols}
+
+def create_table(headers, rows):
+    """【重磅升级】创建原生表格 (Table)"""
+    cells = []
+    for h in headers:
+        cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(h), bold=True)]})
+    for row in rows:
+        for cell in row:
+            cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(cell))]})
+    return {
+        "block_type": 31,
+        "table": {"row_size": len(rows) + 1, "column_size": len(headers), "property": {"header_row": True}},
+        "children": cells
+    }
+
+def empty_line():
+    return {"block_type": 2, "text": {"elements": []}}
+
+# ===================== 4. 视觉看板组装引擎 =====================
+
+def build_visual_blocks(data, diagram_file_token=None):
     blocks = []
 
     # 1. 顶部元数据
     meta = data.get("meta", {})
-    blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": safe_text(meta.get('theme', '战略会议纪要'))}}]}})
-    blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 时间: {safe_text(meta.get('time', '近期'))}   |   👥 参会人: {safe_text(meta.get('participants', '与会人员'))}", "text_element_style": {"text_color": 7}}}]}})
-    blocks.append({"block_type": 22, "divider": {}}) # 分割线
-
-    # 2. 战略级核心共识
-    consensus = safe_text(data.get("core_consensus", ""))
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "💡 战略核心共识"}}]}})
-    blocks.append({
-        "block_type": 2,
-        "text": {"elements": [{"text_run": {"content": f" {consensus} ", "text_element_style": {"background_color": 5, "bold": True}}}]} # 5=浅蓝色高亮
-    })
+    blocks.append({"block_type": 3, "heading1": {"elements": [{"text_run": {"content": safe_text(meta.get('theme', '战略纪要看板'))}}]}})
+    blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": f"📅 {safe_text(meta.get('time', '近期'))}   |   👥 {safe_text(meta.get('participants', '与会人员'))}", "text_element_style": {"text_color": 7}}}]}})
     blocks.append(empty_line())
 
-    # 3. 商业架构看板 (原生卡片模拟)
-    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 会议逻辑架构与战略拆解"}}]}})
-    dashboard = data.get("dashboard", {})
-    
-    # 卡片A：行业洞察 (紫色系)
-    blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": "📈 行业演变洞察与核心优势"}}]}})
-    for pt in dashboard.get("industry_insight", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": safe_text(pt), "text_element_style": {"background_color": 6}}}]}})
-    
-    # 卡片B：品牌路径 (蓝色系)
-    blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": "🚀 品牌溢价三步走路径"}}]}})
-    for pt in dashboard.get("brand_path", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": safe_text(pt), "text_element_style": {"background_color": 5}}}]}})
-        
-    # 卡片C：本地支撑 (绿色系)
-    blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": "🏢 欧洲本地化支撑体系"}}]}})
-    for pt in dashboard.get("local_support", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": safe_text(pt), "text_element_style": {"background_color": 4}}}]}})
-        
-    # 卡片D：落地策略 (橙色系)
-    blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": "🎯 分阶段落地策略"}}]}})
-    for pt in dashboard.get("phased_strategy", []):
-        blocks.append({"block_type": 12, "bullet": {"elements": [{"text_run": {"content": safe_text(pt), "text_element_style": {"background_color": 2}}}]}})
-    
-    blocks.append({"block_type": 22, "divider": {}})
+    # 2. 脑图插入
+    if diagram_file_token:
+        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "🧠 核心战略脑图"}}]}})
+        blocks.append({"block_type": 27, "image": {"token": diagram_file_token, "width": 1000, "height": 600}})
+        blocks.append(empty_line())
 
-    # 4. 行动与待办 (Checkbox矩阵)
-    todos = data.get("todos", [])
-    if todos:
-        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "✅ 行动与待办矩阵"}}]}})
-        for todo in todos:
-            task = safe_text(todo.get("task"))
-            owner = safe_text(todo.get("owner"))
-            blocks.append({"block_type": 17, "todo": {"style": {"done": False}, "elements": [{"text_run": {"content": f"由 @{owner} 负责: {task}"}}] }})
-        blocks.append({"block_type": 22, "divider": {}})
+    # 3. 核心视图看板 (Grid 并排彩色卡片)
+    blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📊 战略视图看板"}}]}})
+    row1 = data.get("dashboard_row1", [])
+    if row1: blocks.append(create_grid_row(row1))
+    row2 = data.get("dashboard_row2", [])
+    if row2: blocks.append(create_grid_row(row2))
+    blocks.append(empty_line())
 
-    # 5. 原声回溯与深度纪要 (强制高信息密度)
+    # 4. 行动表格 (Table)
+    table_data = data.get("action_table", [])
+    if table_data:
+        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📅 运营与行动跟进表"}}]}})
+        headers = ["核心任务", "责任人", "执行周期"]
+        rows = [[t.get("task"), t.get("owner"), t.get("deadline")] for t in table_data]
+        blocks.append(create_table(headers, rows))
+        blocks.append(empty_line())
+
+    # 5. 会议详情 (长文本高密度还原)
     chapters = data.get("chapters", [])
     if chapters:
-        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "⏱️ 核心议题深层详述"}}]}})
+        blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📝 会议原声深度详述"}}]}})
         for chap in chapters:
-            time_str = safe_text(chap.get("time"))
-            title_str = safe_text(chap.get("title"))
-            blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": f"[{time_str}] {title_str}", "text_element_style": {"text_color": 5}}}]}})
-            
-            # 渲染深度内容
-            content_str = safe_text(chap.get("content"))
-            blocks.append({"block_type": 2, "text": {"elements": [{"text_run": {"content": content_str}}]}})
+            blocks.append({"block_type": 5, "heading3": {"elements": [{"text_run": {"content": f"[{safe_text(chap.get('time'))}] {safe_text(chap.get('title'))}", "text_element_style": {"text_color": 5}}}]}})
+            blocks.append(create_text(chap.get("content")))
             blocks.append(empty_line())
 
     return blocks
@@ -126,19 +173,18 @@ def push_blocks_to_feishu(doc_id, blocks):
     url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
-    # 启用安全重试机制
-    for i in range(0, len(blocks), 40):
-        batch = blocks[i:i+40]
-        try:
-            res = requests.post(url, headers=headers, json={"children": batch}, timeout=15)
-            if res.json().get("code") != 0:
-                for block in batch: 
-                    requests.post(url, headers=headers, json={"children": [block]})
-        except Exception:
-            pass
+    try:
+        res = requests.post(url, headers=headers, json={"children": blocks}, timeout=20)
+        data = res.json()
+        if data.get("code") != 0:
+            st.error(f"❌ 批量写入遭遇飞书拦截，错误信息: {data}")
+            return None
+    except Exception as e:
+        st.error(f"❌ 网络传输中断: {e}")
+        return None
     return f"https://bytedance.feishu.cn/docx/{doc_id}"
 
-# ===================== 4. 商业提炼引擎 (重构大模型认知框架) =====================
+# ===================== 5. 商业提炼引擎 =====================
 
 @st.cache_resource
 def load_model():
@@ -149,27 +195,35 @@ def get_json_data(content):
     headers = {"Authorization": f"Bearer {QWEN_API_KEY}", "Content-Type": "application/json"}
     
     prompt = f"""
-    你是一名麦肯锡级别的顶级商业咨询顾问。请将下方的会议逐字稿转化为极具战略高度、且【信息极度丰满】的结构化商业报告。
+    你是一名麦肯锡级别的商业顾问。请将会议内容转化为具备“图文看板+原生表格”结构的顶级纪要。
     
     【输出结构必须严格为 JSON】：
     {{
         "meta": {{ "theme": "会议主题", "time": "推测时间", "participants": "发言人" }},
-        "core_consensus": "用不少于50字的商业话术总结会议达成的最核心共识",
-        "dashboard": {{
-            "industry_insight": ["行业趋势洞察(带具体背景)", "中方核心优势(必须提取具体数据,如几家工厂/合作方)"],
-            "brand_path": ["品牌化路径步骤1", "步骤2", "步骤3(如:组装转移/本地化)"],
-            "local_support": ["本地仓储物流优势(必须带具体数字,如面积/时效)", "本地分销网络优势(如合作方渠道)"],
-            "phased_strategy": ["短期行动计划(0-3个月)", "中长期建设规划(4-12个月)"]
-        }},
-        "todos": [ {{ "task": "具体行动指令", "owner": "负责人" }} ],
+        "mermaid_mindmap": "mindmap\\n  root((会议核心主题))\\n    关键议题1\\n      细节A\\n      细节B\\n    关键议题2\\n      细节C",
+        "dashboard_row1": [
+            {{ "title": "品牌溢价路径", "items": ["要点1", "要点2"], "color": 5, "emoji": "🚀" }},
+            {{ "title": "本地化支撑体系", "items": ["资源1(带数据)", "资源2"], "color": 4, "emoji": "🏢" }}
+        ],
+        "dashboard_row2": [
+            {{ "title": "分阶段落地策略", "items": ["短期规划", "长期规划"], "color": 2, "emoji": "🎯" }},
+            {{ "title": "竞争壁垒与机遇", "items": ["行业洞察", "核心优势"], "color": 6, "emoji": "🛡️" }}
+        ],
+        "action_table": [
+            {{ "task": "具体行动任务(如:考察海外仓)", "owner": "负责方/人", "deadline": "短期/中长期" }}
+        ],
         "chapters": [ 
             {{ 
                 "time": "00:00:00", 
                 "title": "节点主题", 
-                "content": "【致命警告】此处为会议细节复原！字数绝对不得少于 150 字！必须像速记员一样，把该段落中提到的客户案例、具体业务卡点、数据指标、详细的推演逻辑全盘写出，严禁做干瘪的一句话概括！" 
+                "content": "【致命警告】必须像速记员一样复原细节！字数绝对不得少于 150 字！必须保留会议中的业务数据、客户案例、难点，禁止一句话概括！" 
             }} 
         ]
     }}
+    
+    【注意事项】：
+    1. dashboard 中的 color 只能在 1, 2, 3, 4, 5, 6, 7 中选择。
+    2. mermaid_mindmap 必须使用严格合法的 Mermaid `mindmap` 语法，换行使用 \\\\n，不要使用大括号等特殊符号。
     
     原文内容：{content[:25000]}
     """
@@ -184,15 +238,15 @@ def get_json_data(content):
         st.error(f"❌ AI 接口异常: {e}")
         return None
 
-# ===================== 5. 主控 UI =====================
+# ===================== 6. 主控 UI =====================
 
-st.title("💎 飞书智能纪要：商业战略看板版")
-st.info("已全面接入【麦肯锡商业框架】与【原生卡片排版引擎】，保留 150字/段 极限细节！")
+st.title("💎 飞书智能纪要：顶级视觉看板版")
+st.info("已全面解锁飞书【多列分栏(Grid)】与【原生表格(Table)】API，为您呈现震撼的图文阵列！")
 
 uploaded_file = st.file_uploader("请上传会议文件 (TXT/Audio)", type=["mp3", "wav", "m4a", "txt"])
 
-if uploaded_file and st.button("🚀 生成专家级战略看板", type="primary"):
-    with st.status("正在启动战略架构引擎...", expanded=True) as status:
+if uploaded_file and st.button("🚀 生成顶级视图看板", type="primary"):
+    with st.status("正在启动多维视觉架构引擎...", expanded=True) as status:
         
         status.write("1️⃣ 解析输入文件...")
         if uploaded_file.name.endswith('.txt'):
@@ -207,26 +261,35 @@ if uploaded_file and st.button("🚀 生成专家级战略看板", type="primary
             raw_text = "".join([f"[{int(seg['start']//60):02d}:{int(seg['start']%60):02d}] {seg['text']}\n" for seg in result["segments"]])
             os.remove(temp_path)
             
-        status.write("2️⃣ 顶级商业 AI 正在进行战略解构与长文本扩容 (预计需 1-2 分钟)...")
+        status.write("2️⃣ 顶级 AI 正在绘制脑图与构建卡片数据 (预计需 1-2 分钟)...")
         json_data = get_json_data(raw_text)
         
         if json_data:
             status.write("3️⃣ 建立云端通道...")
-            doc_id = create_feishu_doc(json_data.get('meta', {}).get('theme', '战略会议看板'))
+            doc_id = create_feishu_doc(json_data.get('meta', {}).get('theme', '顶级视图纪要'))
             
             if doc_id:
-                status.write("4️⃣ 注入原生彩色看板模块与万字详解...")
-                blocks = build_dashboard_blocks(json_data)
+                status.write("4️⃣ 正在渲染高清脑图并挂载...")
+                mermaid_code = json_data.get("mermaid_mindmap")
+                diagram_token, img_bytes = generate_and_upload_diagram(doc_id, mermaid_code) if mermaid_code else (None, None)
+                
+                status.write("5️⃣ 注入原生并排卡片与高密度表格...")
+                blocks = build_visual_blocks(json_data, diagram_token)
                 doc_url = push_blocks_to_feishu(doc_id, blocks)
                 
                 if doc_url:
-                    status.update(label="✅ 原生飞书高密度纪要生成成功！", state="complete")
+                    status.update(label="✅ 顶级视觉看板生成成功！", state="complete")
+                    
+                    if img_bytes:
+                        st.markdown("### 🧠 核心战略脑图预览")
+                        st.image(img_bytes, use_column_width=True)
+                    
                     st.markdown(f"""
                     <div style="background:#f0f2f5; padding:30px; border-radius:15px; text-align:center;">
-                        <h2 style="color:#1f2329;">🎉 战略级商业看板已就绪</h2>
-                        <p style="color:#646a73;">已原生复刻四大核心战略模块，且会议细节不漏一字！</p>
+                        <h2 style="color:#1f2329;">🎉 您的专属视觉战略看板已落成</h2>
+                        <p style="color:#646a73;">多列彩色卡片 + 结构脑图 + 原生表格 + 会议万字长文记录</p>
                         <a href="{doc_url}" target="_blank" style="background:#3370ff; color:white; padding:15px 40px; text-decoration:none; border-radius:8px; font-weight:bold; font-size:18px; display:inline-block; margin-top:10px;">
-                            🚀 立即检阅您的专属看板
+                            🚀 立即检阅极具商业质感的飞书文档
                         </a>
                     </div>
                     """, unsafe_allow_html=True)
