@@ -49,7 +49,6 @@ def generate_and_upload_diagram(doc_id, mermaid_code):
         clean_code = mermaid_code.replace("```mermaid", "").replace("```", "").strip()
         clean_code = clean_code.replace('\\n', '\n')
         
-        # 压缩编码请求 Kroki
         compressed = zlib.compress(clean_code.encode('utf-8'), 9)
         encoded = base64.urlsafe_b64encode(compressed).decode('ascii')
         img_url = f"https://kroki.io/mermaid/png/{encoded}"
@@ -59,7 +58,6 @@ def generate_and_upload_diagram(doc_id, mermaid_code):
             
         img_bytes = img_res.content
 
-        # 上传飞书
         upload_url = "https://open.feishu.cn/open-apis/drive/v1/medias/upload_all"
         headers = {"Authorization": f"Bearer {token}"}
         data = {"file_name": "mindmap.png", "parent_type": "docx_image", "parent_node": doc_id, "size": len(img_bytes)}
@@ -97,27 +95,23 @@ def create_card(title, items, bg_color, emoji="📌"):
     }
 
 def create_grid_row(cards):
-    """创建多列分栏 (Grid)，实现左右并排卡片布局"""
+    """【修复核心】不预设子节点的 block_type，仅存放数据供递归引擎使用"""
     cols = []
     for card in cards:
         cols.append({
-            "block_type": 25, "grid_column": {},
             "children": [create_card(card.get("title", ""), card.get("items", []), card.get("color", 5), card.get("emoji", "💡"))]
         })
     return {"block_type": 24, "grid": {"column_size": len(cards)}, "children": cols}
 
 def create_table(headers, rows):
-    """【致命Bug已修复】正确嵌套 Table 的 row_size 和 column_size 参数"""
+    """【修复核心】精准嵌套 property，并在子节点中预留文本块"""
     cells = []
-    # 填充表头
     for h in headers:
-        cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(h), bold=True)]})
-    # 填充表格内容
+        cells.append({"children": [create_text(safe_text(h), bold=True)]})
     for row in rows:
         for cell in row:
-            cells.append({"block_type": 32, "table_cell": {}, "children": [create_text(safe_text(cell))]})
+            cells.append({"children": [create_text(safe_text(cell))]})
             
-    # 【修复点】：飞书严格要求 row_size 和 column_size 必须包裹在 property 字典内部！
     return {
         "block_type": 31,
         "table": {
@@ -167,7 +161,7 @@ def build_visual_blocks(data, diagram_file_token=None):
         blocks.append(create_table(headers, rows))
         blocks.append(empty_line())
 
-    # 5. 会议详情 (长文本高密度还原)
+    # 5. 会议详情
     chapters = data.get("chapters", [])
     if chapters:
         blocks.append({"block_type": 4, "heading2": {"elements": [{"text_run": {"content": "📝 会议原声深度详述"}}]}})
@@ -178,23 +172,68 @@ def build_visual_blocks(data, diagram_file_token=None):
 
     return blocks
 
+# ===================== 5. 【核弹级升级】深度递归写入引擎 =====================
+
 def push_blocks_to_feishu(doc_id, blocks):
+    """
+    这台引擎彻底解决了飞书 API 的容器排版嵌套难题。
+    它会先把容器（表格/分栏/卡片）打空上传，获取飞书自动生成的空位 ID，再递归把内容填进去！
+    """
     token = get_feishu_token()
-    url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks/{doc_id}/children"
+    base_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{doc_id}/blocks"
     headers = {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
     
-    try:
-        res = requests.post(url, headers=headers, json={"children": blocks}, timeout=20)
-        data = res.json()
-        if data.get("code") != 0:
-            st.error(f"❌ 批量写入遭遇飞书拦截，错误信息: {data}")
-            return None
-    except Exception as e:
-        st.error(f"❌ 网络传输中断: {e}")
-        return None
+    def insert_node(parent_id, children):
+        batch = []
+        for child in children:
+            # 遇到复杂容器: 24=分栏(Grid), 31=表格(Table), 19=高亮块(Callout)
+            if child.get("block_type") in [24, 31, 19]: 
+                # 1. 先把手里积攒的普通文本块一次性发掉
+                if batch:
+                    requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
+                    batch = []
+                
+                # 2. 剥离 children，上传一个“纯净”的空容器
+                container_payload = {k: v for k, v in child.items() if k != "children"}
+                res = requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": [container_payload], "index": -1}).json()
+                
+                if res.get("code") != 0:
+                    st.error(f"⚠️ 创建高级组件遭遇拦截: {res.get('msg')}")
+                    continue
+                    
+                new_block_id = res.get("data", {}).get("children", [{}])[0].get("block_id")
+                if not new_block_id: continue
+                
+                # 3. 针对表格和分栏，请求飞书获取系统自动生成的「空单元格」的 ID
+                if child.get("block_type") in [24, 31]:
+                    auto_res = requests.get(f"{base_url}/{new_block_id}/children", headers=headers).json()
+                    auto_items = auto_res.get("data", {}).get("items", [])
+                    
+                    # 将准备好的子内容，对号入座填入自动生成的单元格中
+                    content_list = child.get("children", [])
+                    for i, content_data in enumerate(content_list):
+                        if i < len(auto_items):
+                            insert_node(auto_items[i]["block_id"], content_data.get("children", []))
+                
+                # 针对高亮卡片，直接把内容塞进新卡片里
+                elif child.get("block_type") == 19:
+                    inner_children = child.get("children", [])
+                    if inner_children:
+                        insert_node(new_block_id, inner_children)
+            else:
+                batch.append(child)
+                if len(batch) >= 40:
+                    requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
+                    batch = []
+                    
+        # 处理残余的队列
+        if batch:
+            requests.post(f"{base_url}/{parent_id}/children", headers=headers, json={"children": batch, "index": -1})
+
+    insert_node(doc_id, blocks)
     return f"https://bytedance.feishu.cn/docx/{doc_id}"
 
-# ===================== 5. 商业提炼引擎 =====================
+# ===================== 6. 商业提炼引擎 =====================
 
 @st.cache_resource
 def load_model():
@@ -248,10 +287,10 @@ def get_json_data(content):
         st.error(f"❌ AI 接口异常: {e}")
         return None
 
-# ===================== 6. 主控 UI =====================
+# ===================== 7. 主控 UI =====================
 
 st.title("💎 飞书智能纪要：顶级视觉看板版")
-st.info("已全面解锁飞书【多列分栏(Grid)】与【原生表格(Table)】API，为您呈现震撼的图文阵列！")
+st.info("已接入「深度递归写入引擎」，全面打通飞书表格与多列分栏，彻底消灭嵌套报错！")
 
 uploaded_file = st.file_uploader("请上传会议文件 (TXT/Audio)", type=["mp3", "wav", "m4a", "txt"])
 
@@ -283,7 +322,7 @@ if uploaded_file and st.button("🚀 生成顶级视图看板", type="primary"):
                 mermaid_code = json_data.get("mermaid_mindmap")
                 diagram_token, img_bytes = generate_and_upload_diagram(doc_id, mermaid_code) if mermaid_code else (None, None)
                 
-                status.write("5️⃣ 注入原生并排卡片与高密度表格...")
+                status.write("5️⃣ 正在调用「深度递归引擎」编排原生分栏与高级表格 (安全写入中)...")
                 blocks = build_visual_blocks(json_data, diagram_token)
                 doc_url = push_blocks_to_feishu(doc_id, blocks)
                 
