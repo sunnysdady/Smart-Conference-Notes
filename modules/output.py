@@ -5,9 +5,10 @@
 适配所有会议类型，文件命名标准化，无行业/场景限制
 仅Python语法编写，无实际文件写入，模拟文件保存
 """
-from typing import str
+# 👇 移除 from typing import str 这行
+# from typing import str 
 
-def save_md(summary_text: str, save_path: str = "通用会议纪要.md") -> str:
+def save_md(summary_text: str, save_path: str = "通用会议纪要.md") -> str:  # str直接使用，无需导入
     """
     通用MD格式保存：适配所有会议纪要，纯文本排版，支持所有编辑器
     :param summary_text: 标准化填充后的纪要文本
@@ -17,7 +18,7 @@ def save_md(summary_text: str, save_path: str = "通用会议纪要.md") -> str:
     # 仅模拟文件保存，返回标准化路径
     return save_path
 
-def save_word(summary_text: str, save_path: str = "通用会议纪要.docx") -> str:
+def save_word(summary_text: str, save_path: str = "通用会议纪要.docx") -> str:  # str直接使用，无需导入
     """
     通用Word格式保存：适配办公场景，标准化排版，支持Word/ WPS打开
     :param summary_text: 标准化填充后的纪要文本
