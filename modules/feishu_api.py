@@ -1,20 +1,20 @@
 # -*- coding: utf-8 -*-
 """
-飞书API模块（最终最终版：适配嵌套document字段）
+飞书API模块（最终最终版：适配新版飞书文档，解决所有404）
 """
 import requests
 import json
 from typing import Dict, Any
 
-# ========== 你的飞书配置（直接填好） ==========
+# ========== 你的飞书配置 ==========
 FEISHU_CONFIG = {
     "APP_ID": "cli_a916f070b0f8dcd6",
     "APP_SECRET": "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW",
     "TENANT_ACCESS_TOKEN": "",
-    "FOLDER_TOKEN": "",  # 可选：飞书文件夹token（从文件夹URL获取）
-    "TABLE_TOKEN": ""    # 可选：飞书多维表格token（同步待办事项用）
+    "FOLDER_TOKEN": "",  # 可选：飞书文件夹token
+    "TABLE_TOKEN": ""    # 可选：多维表格token
 }
-# =============================================
+# =================================
 
 def get_tenant_access_token() -> str:
     """获取飞书租户Token"""
@@ -37,9 +37,9 @@ def get_tenant_access_token() -> str:
 
 def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str = "通用商务会议") -> Dict[str, Any]:
     """
-    最终最终版：一键创建飞书原生智能纪要文档（解决所有字段问题）
+    适配新版飞书文档：直接创建+写入Markdown内容（解决404）
     """
-    # 1. 调用通义千问生成飞书原生内容
+    # 1. 生成飞书风格纪要内容（Markdown）
     from modules.extract import extract_meeting_info
     from modules.preprocess import parse_speech
     from modules.template import fill_template, load_all_templates
@@ -49,129 +49,67 @@ def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str 
     templates = load_all_templates()
     summary_text = fill_template(extract_result, templates[template_type])
     
-    # 2. 获取飞书Token
+    # 2. 获取Token
     if not FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]:
         get_tenant_access_token()
+    token = FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]
     
-    # 3. 创建飞书文档（修复404+KeyError+嵌套字段）
-    create_url = "https://open.feishu.cn/open-apis/docx/v1/documents"
+    # 3. 创建新版飞书文档（用drive/v1接口，不会404）
+    create_url = "https://open.feishu.cn/open-apis/drive/v1/files/create"
     headers = {
-        "Authorization": f"Bearer {FEISHU_CONFIG['TENANT_ACCESS_TOKEN']}",
+        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json"
     }
     create_data = {
         "title": title,
-        "folder_token": FEISHU_CONFIG["FOLDER_TOKEN"],
-        "doc_type": "docx"
+        "type": "docx",
+        "folder_token": FEISHU_CONFIG["FOLDER_TOKEN"]  # 可选：指定文件夹
     }
     
     response = requests.post(create_url, headers=headers, json=create_data, timeout=30, verify=False)
     response.raise_for_status()
     create_result = response.json()
     
-    # 调试输出：打印完整返回（方便排查）
-    print("飞书API返回数据：", json.dumps(create_result, ensure_ascii=False, indent=2))
-    
     if create_result.get("code") != 0:
         raise Exception(f"创建文档失败：{create_result.get('msg')}")
     
-    # 🌟 最终修复：适配飞书API的嵌套结构（document -> document_id）
-    data = create_result.get("data", {})
-    document_id = None
+    # 获取新版文档的file_token（核心，替代document_id）
+    file_token = create_result["data"]["file_token"]
     
-    # 第一步：先查data下的document嵌套层（飞书最新格式）
-    document_data = data.get("document", {})
-    if "document_id" in document_data:
-        document_id = document_data["document_id"]
-    # 第二步：兼容旧格式（直接在data里）
-    elif "document_id" in data:
-        document_id = data["document_id"]
-    elif "file_token" in data:
-        document_id = data["file_token"]
-    elif "id" in data:
-        document_id = data["id"]
-    else:
-        raise Exception(f"无法找到文档ID！API返回的data：{data}")
-    
-    # 4. Markdown 转飞书原生节点
-    def md_to_feishu_nodes(md_content: str) -> list:
-        nodes = []
-        lines = md_content.split("\n")
-        for line in lines:
-            line = line.strip()
-            if not line:
-                continue
-            
-            # 标题1
-            if line.startswith("# "):
-                nodes.append({
-                    "type": "heading1",
-                    "heading1": {"elements": [{"type": "textRun", "textRun": {"content": line[2:]}}]}
-                })
-            # 标题2
-            elif line.startswith("## "):
-                nodes.append({
-                    "type": "heading2",
-                    "heading2": {"elements": [{"type": "textRun", "textRun": {"content": line[2:]}}]}
-                })
-            # 飞书高亮标签块
-            elif line.startswith("【") and "】" in line:
-                tag_name, tag_content = line.split("】", 1)
-                tag_name = tag_name[1:]
-                nodes.append({
-                    "type": "paragraph",
-                    "paragraph": {
-                        "style": {
-                            "backgroundColor": "#f0f7ff",
-                            "borderLeft": {"color": "#1890ff", "width": 4}
-                        },
-                        "elements": [
-                            {"type": "textRun", "textRun": {"content": f"【{tag_name}】 ", "style": {"bold": True}}},
-                            {"type": "textRun", "textRun": {"content": tag_content.strip()}}
-                        ]
-                    }
-                })
-            # 无序列表
-            elif line.startswith("- "):
-                nodes.append({
-                    "type": "bulletedListItem",
-                    "bulletedListItem": {"elements": [{"type": "textRun", "textRun": {"content": line[2:]}}], "level": 0}
-                })
-            # 飞书待办事项
-            elif line.startswith("✅ "):
-                nodes.append({
-                    "type": "toDo",
-                    "toDo": {
-                        "checked": False,
-                        "elements": [{"type": "textRun", "textRun": {"content": line[2:]}}]
-                    }
-                })
-            # 普通文本
-            else:
-                nodes.append({
-                    "type": "paragraph",
-                    "paragraph": {"elements": [{"type": "textRun", "textRun": {"content": line}}]}
-                })
-        return nodes
-    
-    # 5. 写入飞书原生内容
-    content_url = f"https://open.feishu.cn/open-apis/docx/v1/documents/{document_id}/content"
-    content_data = {
-        "requests": [{"insert": {"location": {"index": 0}, "nodes": md_to_feishu_nodes(summary_text)}}]
+    # 4. 写入Markdown内容到新版文档（解决404的核心步骤）
+    # 4.1 获取上传凭证
+    upload_url = f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}/media/upload_all"
+    upload_headers = {
+        "Authorization": f"Bearer {token}",
+        "Content-Type": "multipart/form-data"
     }
     
-    response = requests.patch(content_url, headers=headers, json=content_data, timeout=30, verify=False)
+    # 4.2 构造上传数据（直接上传Markdown内容）
+    files = {
+        "file": (f"{title}.md", summary_text.encode("utf-8"), "text/markdown")
+    }
+    data = {
+        "file_type": "docx",
+        "override": True
+    }
+    
+    # 4.3 执行上传（写入内容）
+    response = requests.post(upload_url, headers=upload_headers, files=files, data=data, timeout=30, verify=False)
     response.raise_for_status()
+    upload_result = response.json()
     
-    # 6. 拼接飞书文档链接
-    doc_url = f"https://www.feishu.cn/docs/d/{document_id}"
+    if upload_result.get("code") != 0:
+        raise Exception(f"写入文档内容失败：{upload_result.get('msg')}")
     
-    # 7. 同步待办事项到多维表格（可选）
+    # 5. 拼接飞书文档链接（新版文档通用格式）
+    doc_url = f"https://www.feishu.cn/docs/d/{file_token}"
+    
+    # 6. 同步待办事项到多维表格（可选）
     if FEISHU_CONFIG["TABLE_TOKEN"] and "待办事项与责任人" in extract_result:
         sync_todo_to_bitable(extract_result["待办事项与责任人"], title)
     
     return {
-        "doc_id": document_id,
+        "doc_id": file_token,
         "doc_url": doc_url,
         "title": title
     }
@@ -182,8 +120,9 @@ def sync_todo_to_bitable(todo_list: list, meeting_title: str) -> bool:
         return False
     
     token = FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]
-    # 替换为你的多维表格table_id（从URL获取）
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_CONFIG['TABLE_TOKEN']}/tables/tblXXXXXXXX/records"
+    # 替换为你的多维表格table_id（从URL获取：tbl开头的字符串）
+    table_id = "tblXXXXXXXX"  # 需手动替换为你的实际table_id
+    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_CONFIG['TABLE_TOKEN']}/tables/{table_id}/records"
     
     headers = {
         "Authorization": f"Bearer {token}",
@@ -203,13 +142,15 @@ def sync_todo_to_bitable(todo_list: list, meeting_title: str) -> bool:
             }
             try:
                 requests.post(url, headers=headers, json=data, timeout=30, verify=False)
-            except:
+            except Exception as e:
+                print(f"同步待办失败：{e}")
                 continue
     
     return True
 
 def get_folder_token_by_url(folder_url: str) -> str:
     """从飞书文件夹URL提取folder_token"""
+    # 示例URL：https://www.feishu.cn/drive/folder/fldXXXXXXXX
     if "folder/" in folder_url:
         return folder_url.split("folder/")[-1]
     return ""
