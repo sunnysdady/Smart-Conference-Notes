@@ -1,5 +1,0 @@
-streamlit
-requests
-openai-whisper
-torch
-python-dotenv
