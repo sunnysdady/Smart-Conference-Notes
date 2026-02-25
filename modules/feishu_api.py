@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-飞书API模块（最终修复版：解决KeyError+404）
+飞书API模块（最终最终版：适配嵌套document字段）
 """
 import requests
 import json
@@ -37,7 +37,7 @@ def get_tenant_access_token() -> str:
 
 def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str = "通用商务会议") -> Dict[str, Any]:
     """
-    最终版：一键创建飞书原生智能纪要文档（解决404+KeyError）
+    最终最终版：一键创建飞书原生智能纪要文档（解决所有字段问题）
     """
     # 1. 调用通义千问生成飞书原生内容
     from modules.extract import extract_meeting_info
@@ -53,7 +53,7 @@ def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str 
     if not FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]:
         get_tenant_access_token()
     
-    # 3. 创建飞书文档（修复404+KeyError）
+    # 3. 创建飞书文档（修复404+KeyError+嵌套字段）
     create_url = "https://open.feishu.cn/open-apis/docx/v1/documents"
     headers = {
         "Authorization": f"Bearer {FEISHU_CONFIG['TENANT_ACCESS_TOKEN']}",
@@ -75,11 +75,16 @@ def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str 
     if create_result.get("code") != 0:
         raise Exception(f"创建文档失败：{create_result.get('msg')}")
     
-    # 🌟 核心修复：兼容所有可能的文档ID字段名
+    # 🌟 最终修复：适配飞书API的嵌套结构（document -> document_id）
     data = create_result.get("data", {})
     document_id = None
-    # 按优先级查找字段
-    if "document_id" in data:
+    
+    # 第一步：先查data下的document嵌套层（飞书最新格式）
+    document_data = data.get("document", {})
+    if "document_id" in document_data:
+        document_id = document_data["document_id"]
+    # 第二步：兼容旧格式（直接在data里）
+    elif "document_id" in data:
         document_id = data["document_id"]
     elif "file_token" in data:
         document_id = data["file_token"]
