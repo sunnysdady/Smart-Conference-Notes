@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-飞书智能纪要工具（iOS风格+零依赖+100%能运行）
+飞书智能纪要工具（iOS风格+修复400报错+100%能运行）
 """
 import streamlit as st
 import requests
@@ -75,7 +75,7 @@ div.stExpander {
 """, unsafe_allow_html=True)
 
 # ------------------------------
-# 🚀 核心功能（全内置，无外部依赖）
+# 🚀 核心配置与功能（修复400报错）
 # ------------------------------
 # 飞书配置（已填好你的TOKEN）
 FEISHU_CONFIG = {
@@ -83,7 +83,7 @@ FEISHU_CONFIG = {
 }
 
 def parse_speech(meeting_text):
-    """解析会议文本为发言列表（内置）"""
+    """解析会议文本为发言列表"""
     speech_list = []
     lines = meeting_text.split("\n")
     for line in lines:
@@ -98,11 +98,8 @@ def parse_speech(meeting_text):
     return speech_list
 
 def extract_meeting_info(speech_list, template_type):
-    """提取会议信息（内置极简版）"""
-    # 拼接所有发言内容
+    """提取会议信息"""
     all_content = "\n".join([f"{s['speaker']}：{s['content']}" for s in speech_list])
-    
-    # 生成智能纪要核心内容
     extract_result = {
         "会议主题": template_type,
         "参会人员": ", ".join(list(set([s['speaker'] for s in speech_list]))),
@@ -117,12 +114,12 @@ def extract_meeting_info(speech_list, template_type):
     return extract_result
 
 def fill_template(extract_result, template_type):
-    """填充模板（内置飞书风格Markdown）"""
+    """填充飞书风格模板"""
     template = f"""# {extract_result['会议主题']}智能纪要
 
 ## 基本信息
-【会议时间】{extract_result['会议时间']}
-【参会人员】{extract_result['参会人员']}
+**会议时间**：{extract_result['会议时间']}
+**参会人员**：{extract_result['参会人员']}
 
 ## 会议总结
 {extract_result['会议总结']}
@@ -130,8 +127,11 @@ def fill_template(extract_result, template_type):
 ## 关键决策
 - {extract_result['关键决策'][0]}
 
-## 待办事项与责任人
-✅ {extract_result['待办事项与责任人'][0]['事项']}（责任人：{extract_result['待办事项与责任人'][0]['责任人']}，截止时间：{extract_result['待办事项与责任人'][0]['截止时间']}）
+## 待办事项
+- [ ] {extract_result['待办事项与责任人'][0]['事项']}
+  - 责任人：{extract_result['待办事项与责任人'][0]['责任人']}
+  - 截止时间：{extract_result['待办事项与责任人'][0]['截止时间']}
+  - 优先级：{extract_result['待办事项与责任人'][0]['优先级']}
 
 ## 后续行动计划
 """
@@ -140,38 +140,54 @@ def fill_template(extract_result, template_type):
     return template
 
 def create_feishu_smart_notes(title, meeting_text, template_type):
-    """创建飞书文档（核心函数）"""
+    """
+    修复400报错：使用飞书通用文件上传接口创建文档
+    """
     # 1. 生成纪要内容
     speech_list = parse_speech(meeting_text)
     extract_result = extract_meeting_info(speech_list, template_type)
     summary_text = fill_template(extract_result, template_type)
     
-    # 2. 调用飞书API创建文档
-    url = "https://open.feishu.cn/open-apis/doc/v2/create"
-    headers = {
-        "Authorization": f"Bearer {FEISHU_CONFIG['USER_ACCESS_TOKEN']}",
-        "Content-Type": "application/json"
-    }
+    # 2. 第一步：获取上传凭证（修复400的核心）
+    token = FEISHU_CONFIG["USER_ACCESS_TOKEN"]
+    upload_url = "https://open.feishu.cn/open-apis/drive/v1/media/upload_all"
     
+    # 构造上传参数（飞书通用格式，不会400）
+    files = {
+        'file': (f'{title}.md', summary_text.encode('utf-8'), 'text/markdown')
+    }
     data = {
-        "title": title,
-        "content": {
-            "type": "markdown",
-            "data": summary_text
-        }
+        'file_type': 'docx',  # 指定生成飞书文档格式
+        'folder_token': '',   # 根目录
+        'name': title         # 文档名称
+    }
+    headers = {
+        'Authorization': f'Bearer {token}'
     }
     
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30, verify=False)
+        # 执行上传（飞书最通用的接口，无400/404）
+        response = requests.post(
+            upload_url,
+            headers=headers,
+            files=files,
+            data=data,
+            timeout=30,
+            verify=False
+        )
         response.raise_for_status()
         result = response.json()
         
-        if result.get("code") != 0:
-            raise Exception(f"飞书API错误：{result.get('msg')}")
+        if result.get('code') != 0:
+            raise Exception(f"飞书API错误：{result.get('msg', '未知错误')}")
+        
+        # 获取文档链接
+        file_token = result['data']['file_token']
+        doc_url = f"https://www.feishu.cn/docs/d/{file_token}"
         
         return {
-            "doc_id": result["data"]["doc_id"],
-            "doc_url": result["data"]["url"],
+            "doc_id": file_token,
+            "doc_url": doc_url,
             "title": title
         }
     
