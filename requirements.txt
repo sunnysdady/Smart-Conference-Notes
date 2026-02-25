@@ -1,0 +1,11 @@
+# 通用智能会议纪要生成工具 - 依赖清单
+# 适配Python3.8+，无行业专属依赖，可直接扩展
+streamlit>=1.30.0          # 通用Web界面开发
+langchain>=0.1.0           # 通用大模型调用封装
+jieba>=0.42.1              # 通用中文分词
+sentence-transformers>=2.2.0 # 通用文本向量化
+python-docx>=0.8.11        # 通用Word格式导出
+pyyaml>=6.0.1              # 通用模板配置
+requests>=2.31.0           # 通用API调用
+re>=2.2.1                  # 通用正则表达式
+typing>=3.7.4.3            # 通用类型注解
