@@ -1,156 +1,130 @@
 # -*- coding: utf-8 -*-
-"""
-飞书API模块（最终最终版：适配新版飞书文档，解决所有404）
-"""
-import requests
-import json
-from typing import Dict, Any
+import streamlit as st
+import os
+from modules.feishu_api import create_feishu_smart_notes
 
-# ========== 你的飞书配置 ==========
-FEISHU_CONFIG = {
-    "APP_ID": "cli_a916f070b0f8dcd6",
-    "APP_SECRET": "gHOYZxXsoTXpmsnyf37C5dqcN4tOkibW",
-    "TENANT_ACCESS_TOKEN": "",
-    "FOLDER_TOKEN": "",  # 可选：飞书文件夹token
-    "TABLE_TOKEN": ""    # 可选：多维表格token
+# ------------------------------
+# 🌿 iOS 风格页面配置
+# ------------------------------
+st.set_page_config(
+    page_title="会议纪要",
+    page_icon="📝",
+    layout="centered",
+    initial_sidebar_state="collapsed"
+)
+
+# ------------------------------
+# 🎨 iOS 风格 CSS
+# ------------------------------
+st.markdown("""
+<style>
+* {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
+    letter-spacing: 0.2px;
 }
-# =================================
+body {
+    background-color: #F5F7FA;
+}
+.block-container {
+    max-width: 390px !important;
+    padding-top: 2rem !important;
+    padding-bottom: 3rem !important;
+}
+h1 {
+    font-size: 28px !important;
+    font-weight: 600 !important;
+    color: #1D1D1F !important;
+    text-align: center !important;
+    margin-bottom: 10px !important;
+}
+div.stButton > button {
+    border-radius: 14px !important;
+    background-color: #007AFF !important;
+    color: white !important;
+    font-weight: 500 !important;
+    border: none !important;
+    height: 50px !important;
+    font-size: 16px !important;
+    box-shadow: 0 2px 8px rgba(0,122,255,0.15) !important;
+}
+div.stButton > button:hover {
+    background-color: #0062CC !important;
+    box-shadow: 0 3px 10px rgba(0,122,255,0.2) !important;
+}
+.uploadedFile {
+    border-radius: 14px !important;
+    background-color: white !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+}
+.stAlert {
+    border-radius: 12px !important;
+    background-color: white !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    border-left: none !important;
+}
+div.stExpander {
+    border-radius: 14px !important;
+    background-color: white !important;
+    box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+}
+#MainMenu, footer, header {visibility: hidden;}
+</style>
+""", unsafe_allow_html=True)
 
-def get_tenant_access_token() -> str:
-    """获取飞书租户Token"""
-    url = "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "app_id": FEISHU_CONFIG["APP_ID"],
-        "app_secret": FEISHU_CONFIG["APP_SECRET"]
-    }
+# ------------------------------
+# 📱 iOS 界面内容
+# ------------------------------
+st.title("会议纪要")
+
+st.markdown(
+    '<p style="text-align: center; color: #8A8A8E; margin-top:-10px; margin-bottom:30px;">'
+    '一键生成飞书原生智能纪要</p>',
+    unsafe_allow_html=True
+)
+
+# 模板选择
+template_type = st.selectbox(
+    "会议类型",
+    options=["通用商务会议", "项目同步会议", "需求评审会议", "周度例会"],
+    index=0
+)
+
+# 文件上传
+uploaded_file = st.file_uploader("上传会议文本（TXT）", type=["txt"])
+
+if uploaded_file is not None:
     try:
-        response = requests.post(url, headers=headers, json=data, timeout=30, verify=False)
-        response.raise_for_status()
-        result = response.json()
-        if result.get("code") == 0:
-            FEISHU_CONFIG["TENANT_ACCESS_TOKEN"] = result["tenant_access_token"]
-            return result["tenant_access_token"]
-        raise Exception(f"获取Token失败：{result.get('msg', '未知错误')}")
+        meeting_text = uploaded_file.read().decode("utf-8")
+        st.success("✅ 文件已上传")
+
+        # 预览原文
+        with st.expander("查看原文", expanded=False):
+            st.text(meeting_text)
+
+        # 一键生成
+        if st.button("🚀 生成飞书纪要", type="primary"):
+            with st.spinner("处理中..."):
+                doc_title = f"{template_type}_智能纪要"
+                feishu_doc = create_feishu_smart_notes(doc_title, meeting_text, template_type)
+
+                # 显示结果
+                st.success("✅ 飞书纪要已生成")
+                st.markdown(f"🔗 **文档链接**：[点击打开]({feishu_doc['doc_url']})")
+                st.info("在飞书中打开，就是原生纪要格式！")
+
+                # 预览生成的内容
+                with st.expander("预览纪要内容", expanded=False):
+                    from modules.extract import extract_meeting_info
+                    from modules.template import fill_template, load_all_templates
+                    from modules.preprocess import parse_speech
+                    
+                    speech_list = parse_speech(meeting_text)
+                    extract_result = extract_meeting_info(speech_list, template_type)
+                    templates = load_all_templates()
+                    summary_text = fill_template(extract_result, templates[template_type])
+                    st.markdown(summary_text, unsafe_allow_html=True)
+
     except Exception as e:
-        raise Exception(f"飞书API错误：{str(e)}")
-
-def create_feishu_smart_notes(title: str, meeting_text: str, template_type: str = "通用商务会议") -> Dict[str, Any]:
-    """
-    适配新版飞书文档：直接创建+写入Markdown内容（解决404）
-    """
-    # 1. 生成飞书风格纪要内容（Markdown）
-    from modules.extract import extract_meeting_info
-    from modules.preprocess import parse_speech
-    from modules.template import fill_template, load_all_templates
-    
-    speech_list = parse_speech(meeting_text)
-    extract_result = extract_meeting_info(speech_list, template_type)
-    templates = load_all_templates()
-    summary_text = fill_template(extract_result, templates[template_type])
-    
-    # 2. 获取Token
-    if not FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]:
-        get_tenant_access_token()
-    token = FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]
-    
-    # 3. 创建新版飞书文档（用drive/v1接口，不会404）
-    create_url = "https://open.feishu.cn/open-apis/drive/v1/files/create"
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    create_data = {
-        "title": title,
-        "type": "docx",
-        "folder_token": FEISHU_CONFIG["FOLDER_TOKEN"]  # 可选：指定文件夹
-    }
-    
-    response = requests.post(create_url, headers=headers, json=create_data, timeout=30, verify=False)
-    response.raise_for_status()
-    create_result = response.json()
-    
-    if create_result.get("code") != 0:
-        raise Exception(f"创建文档失败：{create_result.get('msg')}")
-    
-    # 获取新版文档的file_token（核心，替代document_id）
-    file_token = create_result["data"]["file_token"]
-    
-    # 4. 写入Markdown内容到新版文档（解决404的核心步骤）
-    # 4.1 获取上传凭证
-    upload_url = f"https://open.feishu.cn/open-apis/drive/v1/files/{file_token}/media/upload_all"
-    upload_headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "multipart/form-data"
-    }
-    
-    # 4.2 构造上传数据（直接上传Markdown内容）
-    files = {
-        "file": (f"{title}.md", summary_text.encode("utf-8"), "text/markdown")
-    }
-    data = {
-        "file_type": "docx",
-        "override": True
-    }
-    
-    # 4.3 执行上传（写入内容）
-    response = requests.post(upload_url, headers=upload_headers, files=files, data=data, timeout=30, verify=False)
-    response.raise_for_status()
-    upload_result = response.json()
-    
-    if upload_result.get("code") != 0:
-        raise Exception(f"写入文档内容失败：{upload_result.get('msg')}")
-    
-    # 5. 拼接飞书文档链接（新版文档通用格式）
-    doc_url = f"https://www.feishu.cn/docs/d/{file_token}"
-    
-    # 6. 同步待办事项到多维表格（可选）
-    if FEISHU_CONFIG["TABLE_TOKEN"] and "待办事项与责任人" in extract_result:
-        sync_todo_to_bitable(extract_result["待办事项与责任人"], title)
-    
-    return {
-        "doc_id": file_token,
-        "doc_url": doc_url,
-        "title": title
-    }
-
-def sync_todo_to_bitable(todo_list: list, meeting_title: str) -> bool:
-    """同步待办事项到飞书多维表格"""
-    if not FEISHU_CONFIG["TABLE_TOKEN"] or not todo_list:
-        return False
-    
-    token = FEISHU_CONFIG["TENANT_ACCESS_TOKEN"]
-    # 替换为你的多维表格table_id（从URL获取：tbl开头的字符串）
-    table_id = "tblXXXXXXXX"  # 需手动替换为你的实际table_id
-    url = f"https://open.feishu.cn/open-apis/bitable/v1/apps/{FEISHU_CONFIG['TABLE_TOKEN']}/tables/{table_id}/records"
-    
-    headers = {
-        "Authorization": f"Bearer {token}",
-        "Content-Type": "application/json"
-    }
-    
-    for todo in todo_list:
-        if isinstance(todo, dict):
-            data = {
-                "fields": {
-                    "会议标题": meeting_title,
-                    "待办事项": todo.get("事项", ""),
-                    "责任人": todo.get("责任人", ""),
-                    "截止时间": todo.get("截止时间", ""),
-                    "优先级": todo.get("优先级", "中")
-                }
-            }
-            try:
-                requests.post(url, headers=headers, json=data, timeout=30, verify=False)
-            except Exception as e:
-                print(f"同步待办失败：{e}")
-                continue
-    
-    return True
-
-def get_folder_token_by_url(folder_url: str) -> str:
-    """从飞书文件夹URL提取folder_token"""
-    # 示例URL：https://www.feishu.cn/drive/folder/fldXXXXXXXX
-    if "folder/" in folder_url:
-        return folder_url.split("folder/")[-1]
-    return ""
+        st.error(f"❌ 生成失败：{str(e)}")
+        with st.expander("错误详情"):
+            st.exception(e)
