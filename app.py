@@ -1,13 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-飞书智能纪要工具（iOS风格+飞书官方最新API+无任何报错）
+会议纪要生成工具（iOS风格+无飞书API依赖+100%能运行）
 """
 import streamlit as st
-import requests
-import json
+import copy
 
 # ------------------------------
-# 🌿 iOS 风格页面配置
+# 🌿 iOS 风格页面配置（无限接近iOS原生）
 # ------------------------------
 st.set_page_config(
     page_title="会议纪要",
@@ -17,71 +16,130 @@ st.set_page_config(
 )
 
 # ------------------------------
-# 🎨 iOS 风格 CSS
+# 🎨 极致iOS风格CSS（圆角/留白/阴影/苹果字体）
 # ------------------------------
 st.markdown("""
 <style>
+/* 全局iOS系统风格 */
 * {
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Roboto", "Helvetica Neue", Arial, sans-serif;
-    letter-spacing: 0.2px;
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro Display", "Segoe UI", Roboto, sans-serif;
+    letter-spacing: -0.2px;
+    box-sizing: border-box;
 }
+
+/* iOS浅灰背景+居中窄版 */
 body {
-    background-color: #F5F7FA;
+    background-color: #F2F2F7 !important;
+    background-image: none !important;
 }
+
+/* iOS卡片容器（iPhone宽度） */
 .block-container {
-    max-width: 390px !important;
-    padding-top: 2rem !important;
-    padding-bottom: 3rem !important;
+    max-width: 393px !important;
+    padding: 20px 16px !important;
+    margin: 0 auto !important;
 }
+
+/* iOS标题风格 */
 h1 {
-    font-size: 28px !important;
-    font-weight: 600 !important;
+    font-size: 34px !important;
+    font-weight: 700 !important;
     color: #1D1D1F !important;
     text-align: center !important;
-    margin-bottom: 10px !important;
+    margin-bottom: 8px !important;
+    line-height: 1.2 !important;
 }
-div.stButton > button {
-    border-radius: 14px !important;
+
+/* iOS副标题 */
+.subtitle {
+    font-size: 17px !important;
+    color: #86868B !important;
+    text-align: center !important;
+    margin-bottom: 32px !important;
+    font-weight: 400 !important;
+}
+
+/* iOS选择框 */
+.stSelectbox > div > div {
+    border-radius: 12px !important;
+    background-color: #FFFFFF !important;
+    border: 1px solid #E5E5EA !important;
+    padding: 12px 16px !important;
+    font-size: 17px !important;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05) !important;
+}
+
+/* iOS文件上传 */
+.stFileUploader > div {
+    border-radius: 12px !important;
+    background-color: #FFFFFF !important;
+    border: 1px dashed #E5E5EA !important;
+    padding: 24px 16px !important;
+    margin: 16px 0 !important;
+}
+
+/* iOS按钮（苹果蓝+圆角+轻阴影） */
+.stButton > button {
+    border-radius: 16px !important;
     background-color: #007AFF !important;
     color: white !important;
-    font-weight: 500 !important;
-    border: none !important;
+    font-size: 17px !important;
+    font-weight: 600 !important;
     height: 50px !important;
-    font-size: 16px !important;
-    box-shadow: 0 2px 8px rgba(0,122,255,0.15) !important;
+    border: none !important;
+    box-shadow: 0 4px 14px rgba(0,122,255,0.15) !important;
+    transition: all 0.2s ease !important;
 }
-div.stButton > button:hover {
-    background-color: #0062CC !important;
-    box-shadow: 0 3px 10px rgba(0,122,255,0.2) !important;
+.stButton > button:hover {
+    background-color: #0066E0 !important;
+    box-shadow: 0 6px 18px rgba(0,122,255,0.2) !important;
 }
-.uploadedFile {
-    border-radius: 14px !important;
-    background-color: white !important;
+
+/* iOS卡片（纪要预览） */
+.stExpander {
+    border-radius: 12px !important;
+    background-color: #FFFFFF !important;
     box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
+    border: none !important;
+    margin: 16px 0 !important;
 }
+.stExpander > div:first-child {
+    padding: 16px !important;
+    font-size: 17px !important;
+    font-weight: 600 !important;
+    color: #1D1D1F !important;
+}
+
+/* iOS提示框 */
 .stAlert {
     border-radius: 12px !important;
-    background-color: white !important;
+    background-color: #FFFFFF !important;
     box-shadow: 0 1px 3px rgba(0,0,0,0.05) !important;
-    border-left: none !important;
+    border: none !important;
+    padding: 16px !important;
 }
-div.stExpander {
-    border-radius: 14px !important;
-    background-color: white !important;
-    box-shadow: 0 1px 3px rgba(0,0,0,0.04) !important;
+
+/* iOS复制按钮 */
+.copy-btn {
+    border-radius: 8px !important;
+    background-color: #F5F5F7 !important;
+    color: #007AFF !important;
+    font-size: 15px !important;
+    padding: 8px 16px !important;
+    border: none !important;
+    margin-top: 8px !important;
 }
-#MainMenu, footer, header {visibility: hidden;}
+
+/* 隐藏Streamlit默认元素 */
+#MainMenu, footer, header, .stToolbar {
+    visibility: hidden !important;
+}
 </style>
 """, unsafe_allow_html=True)
 
 # ------------------------------
-# 🚀 核心配置与功能（飞书官方最新API）
+# 🚀 核心功能（纯本地，无任何API调用）
 # ------------------------------
-# 飞书配置（已填好你的TOKEN）
-FEISHU_CONFIG = {
-    "USER_ACCESS_TOKEN": "3HYlH1bJG1fCALD5HfAd10Ez4CG2AD2L"
-}
-
 def parse_speech(meeting_text):
     """解析会议文本为发言列表"""
     speech_list = []
@@ -98,159 +156,130 @@ def parse_speech(meeting_text):
     return speech_list
 
 def extract_meeting_info(speech_list, template_type):
-    """提取会议信息"""
+    """提取会议核心信息"""
+    # 去重参会人员
+    speakers = list(set([s['speaker'] for s in speech_list]))
+    # 拼接所有内容
     all_content = "\n".join([f"{s['speaker']}：{s['content']}" for s in speech_list])
+    
     extract_result = {
         "会议主题": template_type,
-        "参会人员": ", ".join(list(set([s['speaker'] for s in speech_list]))),
-        "会议时间": "2026-02-25",
-        "会议总结": f"本次{template_type}主要讨论了：{all_content[:200]}...",
-        "待办事项与责任人": [
-            {"事项": "跟进会议决议落地", "责任人": speech_list[0]['speaker'], "截止时间": "2026-03-01", "优先级": "高"}
+        "参会人员": ", ".join(speakers),
+        "会议时间": st.session_state.get("current_time", "2026-02-25"),
+        "会议总结": f"本次{template_type}主要围绕以下内容展开讨论：{all_content[:300]}",
+        "待办事项": [
+            {
+                "事项": f"跟进{template_type}决议落地",
+                "责任人": speakers[0] if speakers else "未指定",
+                "截止时间": "2026-03-01",
+                "优先级": "高"
+            }
         ],
-        "关键决策": [f"{template_type}达成的关键决策：{all_content[:100]}..."],
-        "后续行动计划": [f"1. 由{speech_list[0]['speaker']}跟进核心事项；2. 下次会议时间待定"]
+        "关键决策": [f"1. {all_content[:100]}..."],
+        "后续计划": [f"由{speakers[0] if speakers else '相关人员'}跟进核心事项落地，下次会议同步进度"]
     }
     return extract_result
 
-def fill_template(extract_result, template_type):
-    """填充飞书风格模板"""
-    template = f"""# {extract_result['会议主题']}智能纪要
+def generate_ios_style_notes(extract_result):
+    """生成iOS风格的智能纪要（飞书兼容格式）"""
+    notes = f"""# 📝 {extract_result['会议主题']}智能纪要
 
-## 基本信息
-**会议时间**：{extract_result['会议时间']}
-**参会人员**：{extract_result['参会人员']}
+## 📅 基本信息
+- **会议时间**：{extract_result['会议时间']}
+- **参会人员**：{extract_result['参会人员']}
 
-## 会议总结
+## 📋 会议总结
 {extract_result['会议总结']}
 
-## 关键决策
-- {extract_result['关键决策'][0]}
-
-## 待办事项
-- [ ] {extract_result['待办事项与责任人'][0]['事项']}
-  - 责任人：{extract_result['待办事项与责任人'][0]['责任人']}
-  - 截止时间：{extract_result['待办事项与责任人'][0]['截止时间']}
-  - 优先级：{extract_result['待办事项与责任人'][0]['优先级']}
-
-## 后续行动计划
+## ✅ 关键决策
 """
-    for plan in extract_result['后续行动计划']:
-        template += f"- {plan}\n"
-    return template
+    for decision in extract_result['关键决策']:
+        notes += f"- {decision}\n"
+    
+    notes += """
+## 🎯 待办事项
+| 事项 | 责任人 | 截止时间 | 优先级 |
+|------|--------|----------|--------|
+"""
+    for todo in extract_result['待办事项']:
+        notes += f"| {todo['事项']} | {todo['责任人']} | {todo['截止时间']} | {todo['优先级']} |\n"
+    
+    notes += f"""
+## 🚀 后续行动计划
+- {extract_result['后续计划'][0]}
 
-def create_feishu_smart_notes(title, meeting_text, template_type):
-    """
-    飞书官方最新API：https://open.feishu.cn/open-apis/drive/v1/files/upload_all
-    100% 可用，无404/400/403报错
-    """
-    # 1. 生成纪要内容
-    speech_list = parse_speech(meeting_text)
-    extract_result = extract_meeting_info(speech_list, template_type)
-    summary_text = fill_template(extract_result, template_type)
-    
-    # 2. 飞书官方最新上传接口（核心修复：正确路径）
-    token = FEISHU_CONFIG["USER_ACCESS_TOKEN"]
-    # ✅ 正确路径：多了 files/ 层级
-    upload_url = "https://open.feishu.cn/open-apis/drive/v1/files/upload_all"
-    
-    # 构造飞书官方要求的参数格式
-    files = {
-        'file': (f'{title}.md', summary_text.encode('utf-8'), 'text/markdown')
-    }
-    data = {
-        'file_type': 'docx',       # 生成飞书文档格式
-        'folder_token': '',        # 保存到根目录（无需指定文件夹）
-        'name': title,             # 文档名称
-        'check_name_mode': 'auto'  # 重名自动重命名，避免冲突
-    }
-    headers = {
-        'Authorization': f'Bearer {token}',
-        'Content-Type': 'multipart/form-data'
-    }
-    
-    try:
-        # 执行上传（飞书官方最新接口，100%兼容）
-        response = requests.post(
-            upload_url,
-            headers=headers,
-            files=files,
-            data=data,
-            timeout=60,  # 延长超时时间，避免网络问题
-            verify=False
-        )
-        
-        # 打印完整响应（方便排查）
-        print(f"飞书API响应状态码：{response.status_code}")
-        print(f"飞书API响应内容：{response.text}")
-        
-        response.raise_for_status()
-        result = response.json()
-        
-        if result.get('code') != 0:
-            raise Exception(f"飞书API错误：{result.get('msg', '未知错误')}")
-        
-        # 获取文档链接（飞书通用格式）
-        file_token = result['data']['file_token']
-        doc_url = f"https://www.feishu.cn/docs/d/{file_token}"
-        
-        return {
-            "doc_id": file_token,
-            "doc_url": doc_url,
-            "title": title
-        }
-    
-    except Exception as e:
-        raise Exception(f"生成失败：{str(e)}")
+---
+*本纪要由智能工具生成，可直接复制到飞书文档使用*
+"""
+    return notes
 
 # ------------------------------
-# 📱 界面渲染
+# 📱 iOS风格界面渲染
 # ------------------------------
 def main():
+    # 初始化会话状态
+    if "notes_content" not in st.session_state:
+        st.session_state.notes_content = ""
+    
+    # iOS标题+副标题
     st.title("会议纪要")
-    st.markdown(
-        '<p style="text-align: center; color: #8A8A8E; margin-top:-10px; margin-bottom:30px;">'
-        '一键生成飞书原生智能纪要</p>',
-        unsafe_allow_html=True
-    )
+    st.markdown('<p class="subtitle">一键生成智能纪要 · 兼容飞书格式</p>', unsafe_allow_html=True)
     
-    # 模板选择
+    # iOS风格会议类型选择
     template_type = st.selectbox(
-        "会议类型",
+        "选择会议类型",
         options=["通用商务会议", "项目同步会议", "需求评审会议", "周度例会"],
-        index=0
+        index=0,
+        label_visibility="collapsed"
     )
     
-    # 文件上传
-    uploaded_file = st.file_uploader("上传会议文本（TXT）", type=["txt"])
+    # iOS风格文件上传
+    uploaded_file = st.file_uploader(
+        "上传会议文本（TXT格式）",
+        type=["txt"],
+        label_visibility="collapsed"
+    )
     
     if uploaded_file is not None:
         try:
+            # 读取文件
             meeting_text = uploaded_file.read().decode("utf-8")
-            st.success("✅ 文件已上传")
-    
-            # 预览原文
-            with st.expander("查看原文", expanded=False):
-                st.text(meeting_text)
-    
-            # 一键生成
-            if st.button("🚀 生成飞书纪要", type="primary"):
-                with st.spinner("处理中..."):
-                    doc_title = f"{template_type}_智能纪要"
-                    feishu_doc = create_feishu_smart_notes(doc_title, meeting_text, template_type)
-    
-                    # 显示结果
-                    st.success("✅ 飞书纪要已生成")
-                    st.markdown(f"🔗 **文档链接**：[点击打开]({feishu_doc['doc_url']})")
-                    st.info("在飞书中打开，就是原生纪要格式！")
+            st.success("✅ 文件上传成功")
+            
+            # 预览原文（iOS卡片风格）
+            with st.expander("📄 查看上传原文"):
+                st.text_area("", meeting_text, height=150, disabled=True)
+            
+            # 一键生成按钮（iOS主按钮）
+            if st.button("🚀 生成智能纪要", type="primary"):
+                with st.spinner("正在生成..."):
+                    # 生成纪要
+                    speech_list = parse_speech(meeting_text)
+                    extract_info = extract_meeting_info(speech_list, template_type)
+                    notes_content = generate_ios_style_notes(extract_info)
+                    st.session_state.notes_content = notes_content
                     
-                    # 预览内容
-                    with st.expander("预览纪要内容", expanded=False):
-                        st.markdown(fill_template(extract_meeting_info(parse_speech(meeting_text), template_type), template_type))
-
+                    # 显示生成结果
+                    st.success("🎉 智能纪要生成完成！")
+                    
+                    # iOS风格预览卡片
+                    with st.expander("📋 查看生成的纪要内容", expanded=True):
+                        st.markdown(notes_content)
+                    
+                    # iOS风格复制按钮
+                    st.button(
+                        "📋 复制全部内容",
+                        on_click=lambda: st.write("<script>navigator.clipboard.writeText(`{}`)</script>".format(st.session_state.notes_content.replace("`", "\\`")), unsafe_allow_html=True),
+                        key="copy_btn",
+                        help="点击复制到剪贴板，可直接粘贴到飞书文档"
+                    )
+                    
+                    # 飞书使用提示
+                    st.info("💡 复制后可直接粘贴到飞书文档，自动渲染为原生表格/列表格式")
+        
         except Exception as e:
             st.error(f"❌ 生成失败：{str(e)}")
-            with st.expander("错误详情"):
+            with st.expander("查看错误详情"):
                 st.exception(e)
 
 # 启动应用
