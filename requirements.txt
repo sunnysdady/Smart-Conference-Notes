@@ -1,5 +1,6 @@
-streamlit>=1.30.0
-langchain>=0.1.0
-python-docx>=0.8.11
-pyyaml>=6.0.1
-requests>=2.31.0
+# 通用智能会议纪要生成工具 - 依赖清单（适配大模型）
+streamlit==1.32.2          # 固定版本，避免兼容问题
+python-docx>=0.8.11        # Word格式导出（真实写入）
+pyyaml>=6.0.1              # 模板配置
+requests>=2.31.0           # 调用大模型API（核心依赖）
+charset-normalizer>=3.3.2  # 解决文本编码问题
