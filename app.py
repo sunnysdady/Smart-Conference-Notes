@@ -76,5 +76,12 @@ if uploaded_file is not None:
                 
                 st.success(f"🎉 {template_type}纪要生成完成！适配办公标准化需求")
 
-# 通用底部说明
-st.footer("💡 通用工具 | 支持所有会议类型 | Python+Streamlit开发 | 标准化纪要输出")
+# ====================== 页脚（替换st.footer，兼容所有Streamlit版本）======================
+st.markdown(
+    """
+    <div style='text-align: center; color: #666; font-size: 12px; margin-top: 50px;'>
+    💡 通用工具 | 支持所有会议类型 | Python+Streamlit开发 | 标准化纪要输出
+    </div>
+    """,
+    unsafe_allow_html=True
+)
