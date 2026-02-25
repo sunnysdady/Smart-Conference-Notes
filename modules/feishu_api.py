@@ -1,7 +1,6 @@
 # -*- coding: utf-8 -*-
 import streamlit as st
 import os
-from modules.feishu_api import create_feishu_smart_notes
 
 # ------------------------------
 # 🌿 iOS 风格页面配置
@@ -72,59 +71,59 @@ div.stExpander {
 """, unsafe_allow_html=True)
 
 # ------------------------------
-# 📱 iOS 界面内容
+# 📱 核心功能（延迟导入，避免错误）
 # ------------------------------
-st.title("会议纪要")
-
-st.markdown(
-    '<p style="text-align: center; color: #8A8A8E; margin-top:-10px; margin-bottom:30px;">'
-    '一键生成飞书原生智能纪要</p>',
-    unsafe_allow_html=True
-)
-
-# 模板选择
-template_type = st.selectbox(
-    "会议类型",
-    options=["通用商务会议", "项目同步会议", "需求评审会议", "周度例会"],
-    index=0
-)
-
-# 文件上传
-uploaded_file = st.file_uploader("上传会议文本（TXT）", type=["txt"])
-
-if uploaded_file is not None:
+def main():
+    # 延迟导入feishu_api，避免启动时导入错误
     try:
-        meeting_text = uploaded_file.read().decode("utf-8")
-        st.success("✅ 文件已上传")
+        from modules.feishu_api import create_feishu_smart_notes
+    except ImportError as e:
+        st.error(f"❌ 核心模块导入失败：{str(e)}")
+        st.stop()
+    
+    # 界面内容
+    st.title("会议纪要")
+    st.markdown(
+        '<p style="text-align: center; color: #8A8A8E; margin-top:-10px; margin-bottom:30px;">'
+        '一键生成飞书原生智能纪要</p>',
+        unsafe_allow_html=True
+    )
+    
+    # 模板选择
+    template_type = st.selectbox(
+        "会议类型",
+        options=["通用商务会议", "项目同步会议", "需求评审会议", "周度例会"],
+        index=0
+    )
+    
+    # 文件上传
+    uploaded_file = st.file_uploader("上传会议文本（TXT）", type=["txt"])
+    
+    if uploaded_file is not None:
+        try:
+            meeting_text = uploaded_file.read().decode("utf-8")
+            st.success("✅ 文件已上传")
+    
+            # 预览原文
+            with st.expander("查看原文", expanded=False):
+                st.text(meeting_text)
+    
+            # 一键生成
+            if st.button("🚀 生成飞书纪要", type="primary"):
+                with st.spinner("处理中..."):
+                    doc_title = f"{template_type}_智能纪要"
+                    feishu_doc = create_feishu_smart_notes(doc_title, meeting_text, template_type)
+    
+                    # 显示结果
+                    st.success("✅ 飞书纪要已生成")
+                    st.markdown(f"🔗 **文档链接**：[点击打开]({feishu_doc['doc_url']})")
+                    st.info("在飞书中打开，就是原生纪要格式！")
+    
+        except Exception as e:
+            st.error(f"❌ 生成失败：{str(e)}")
+            with st.expander("错误详情"):
+                st.exception(e)
 
-        # 预览原文
-        with st.expander("查看原文", expanded=False):
-            st.text(meeting_text)
-
-        # 一键生成
-        if st.button("🚀 生成飞书纪要", type="primary"):
-            with st.spinner("处理中..."):
-                doc_title = f"{template_type}_智能纪要"
-                feishu_doc = create_feishu_smart_notes(doc_title, meeting_text, template_type)
-
-                # 显示结果
-                st.success("✅ 飞书纪要已生成")
-                st.markdown(f"🔗 **文档链接**：[点击打开]({feishu_doc['doc_url']})")
-                st.info("在飞书中打开，就是原生纪要格式！")
-
-                # 预览生成的内容
-                with st.expander("预览纪要内容", expanded=False):
-                    from modules.extract import extract_meeting_info
-                    from modules.template import fill_template, load_all_templates
-                    from modules.preprocess import parse_speech
-                    
-                    speech_list = parse_speech(meeting_text)
-                    extract_result = extract_meeting_info(speech_list, template_type)
-                    templates = load_all_templates()
-                    summary_text = fill_template(extract_result, templates[template_type])
-                    st.markdown(summary_text, unsafe_allow_html=True)
-
-    except Exception as e:
-        st.error(f"❌ 生成失败：{str(e)}")
-        with st.expander("错误详情"):
-            st.exception(e)
+# 启动应用
+if __name__ == "__main__":
+    main()
